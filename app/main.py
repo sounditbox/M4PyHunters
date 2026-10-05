@@ -1,4 +1,6 @@
 import logging
+import time
+from time import perf_counter
 from typing import Annotated
 
 from fastapi import FastAPI
@@ -34,13 +36,13 @@ CategoryParam = Annotated[
 # HTTP-контракт
 @app.get("/products/{product_id}", response_model=ProductRead,
          tags=["Products"], description='Получение товара по ID')
-def get_product(product_id: ProductId) -> ProductRead:
+async def get_product(product_id: ProductId) -> ProductRead:
     return ProductService.get_product_by_id(product_id)
 
 
 @app.get("/products", response_model=list[ProductRead],
          tags=["Products"], description='Получение списка товаров')
-def list_products(
+async def list_products(
         search: SearchParam = None,
         limit: LimitParam = 10,
         category: CategoryParam = None,
@@ -52,20 +54,20 @@ def list_products(
 @app.post("/products", response_model=ProductRead,
           status_code=status.HTTP_201_CREATED, tags=["Products"],
           description='Создание нового товара')
-def create_product(product: ProductCreate) -> ProductRead:
+async def create_product(product: ProductCreate) -> ProductRead:
     return ProductService.create(product)
 
 
 @app.put("/products/{product_id}", response_model=ProductRead,
          tags=["Products"], description='Замена товара')
-def replace_product(product_id: ProductId,
+async def replace_product(product_id: ProductId,
                     to_replace: ProductCreate) -> ProductRead:
     return ProductService.replace(product_id, to_replace)
 
 
 @app.patch('/products/{product_id}', response_model=ProductRead,
            tags=["Products"], description='Обновление товара')
-def update_product(product_id: ProductId,
+async def update_product(product_id: ProductId,
                    to_update: ProductUpdate) -> ProductRead:
     return ProductService.update(product_id, to_update)
 
@@ -74,11 +76,11 @@ def update_product(product_id: ProductId,
             status_code=status.HTTP_204_NO_CONTENT,
             description='Удаление товара'
             )
-def delete_product(product_id: ProductId) -> None:
+async def delete_product(product_id: ProductId) -> None:
     ProductService.delete(product_id)
 
 
 @app.exception_handler(ProductNotFoundError)
-def product_not_found():
+async def product_not_found():
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
                         detail="Product not found")
