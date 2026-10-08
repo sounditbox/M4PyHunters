@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import Path, Query, APIRouter
 from starlette import status
 
-from app.db import DbDep
+from app.db.fake_db import DbDep
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 from app.services.product import (
     get_product_by_id, get_products, create,

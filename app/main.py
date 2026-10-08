@@ -2,9 +2,9 @@
 from fastapi import FastAPI, HTTPException
 from starlette import status
 
-from app.db import DbDep
-from .config import get_settings
-from app.lifespan import lifespan
+from app.db.fake_db import DbDep
+from app.core.config import get_settings
+from app.core.lifespan import lifespan
 from app.routers import product
 from app.services.product import ProductNotFoundError
 
