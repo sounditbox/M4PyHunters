@@ -3,8 +3,8 @@ import logging
 from fastapi import FastAPI, HTTPException
 from starlette import status
 
-from app.routers import products_router
-from app.service import ProductNotFoundError
+from app.routers import product
+from app.services.product import ProductNotFoundError
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,4 +21,4 @@ async def product_not_found():
                         detail="Product not found")
 
 
-app.include_router(products_router)
+app.include_router(product.router)

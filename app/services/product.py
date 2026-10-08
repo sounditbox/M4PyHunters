@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.db import fake_db
-from app.schemas import ProductRead, ProductCreate, ProductUpdate
+from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 
 
 class ServiceError(Exception):

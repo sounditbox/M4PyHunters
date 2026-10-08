@@ -3,8 +3,8 @@ from typing import Annotated
 from fastapi import Path, Query, APIRouter
 from starlette import status
 
-from app.schemas import ProductRead, ProductCreate, ProductUpdate
-from app.service import ProductService
+from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
+from app.services.product import ProductService
 
 ProductId = Annotated[int, Path(ge=1, description="ID товара")]
 
@@ -20,17 +20,17 @@ CategoryParam = Annotated[
                       description="Категория товара")
 ]
 
-products_router = APIRouter(prefix='/products', tags=['Products'])
+router = APIRouter(prefix='/products', tags=['Products'])
 
 
-@products_router.get("/products/{product_id}", response_model=ProductRead,
-                     tags=["Products"], description='Получение товара по ID')
+@router.get("/products/{product_id}", response_model=ProductRead,
+            tags=["Products"], description='Получение товара по ID')
 async def get_product(product_id: ProductId) -> ProductRead:
     return ProductService.get_product_by_id(product_id)
 
 
-@products_router.get("/products", response_model=list[ProductRead],
-                     tags=["Products"], description='Получение списка товаров')
+@router.get("/products", response_model=list[ProductRead],
+            tags=["Products"], description='Получение списка товаров')
 async def list_products(
         search: SearchParam = None,
         limit: LimitParam = 10,
@@ -40,30 +40,30 @@ async def list_products(
     return ProductService.get_products(search, limit, category, only_available)
 
 
-@products_router.post("/products", response_model=ProductRead,
-                      status_code=status.HTTP_201_CREATED, tags=["Products"],
-                      description='Создание нового товара')
+@router.post("/products", response_model=ProductRead,
+             status_code=status.HTTP_201_CREATED, tags=["Products"],
+             description='Создание нового товара')
 async def create_product(product: ProductCreate) -> ProductRead:
     return ProductService.create(product)
 
 
-@products_router.put("/products/{product_id}", response_model=ProductRead,
-                     tags=["Products"], description='Замена товара')
+@router.put("/products/{product_id}", response_model=ProductRead,
+            tags=["Products"], description='Замена товара')
 async def replace_product(product_id: ProductId,
                           to_replace: ProductCreate) -> ProductRead:
     return ProductService.replace(product_id, to_replace)
 
 
-@products_router.patch('/products/{product_id}', response_model=ProductRead,
-                       tags=["Products"], description='Обновление товара')
+@router.patch('/products/{product_id}', response_model=ProductRead,
+              tags=["Products"], description='Обновление товара')
 async def update_product(product_id: ProductId,
                          to_update: ProductUpdate) -> ProductRead:
     return ProductService.update(product_id, to_update)
 
 
-@products_router.delete('/products/{product_id}', tags=["Products"],
-                        status_code=status.HTTP_204_NO_CONTENT,
-                        description='Удаление товара'
-                        )
+@router.delete('/products/{product_id}', tags=["Products"],
+               status_code=status.HTTP_204_NO_CONTENT,
+               description='Удаление товара'
+               )
 async def delete_product(product_id: ProductId) -> None:
     ProductService.delete(product_id)
