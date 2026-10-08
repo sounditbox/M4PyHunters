@@ -23,13 +23,13 @@ CategoryParam = Annotated[
 router = APIRouter(prefix='/products', tags=['Products'])
 
 
-@router.get("/products/{product_id}", response_model=ProductRead,
+@router.get("/{product_id}", response_model=ProductRead,
             tags=["Products"], description='Получение товара по ID')
 async def get_product(product_id: ProductId) -> ProductRead:
     return ProductService.get_product_by_id(product_id)
 
 
-@router.get("/products", response_model=list[ProductRead],
+@router.get("", response_model=list[ProductRead],
             tags=["Products"], description='Получение списка товаров')
 async def list_products(
         search: SearchParam = None,
@@ -40,28 +40,28 @@ async def list_products(
     return ProductService.get_products(search, limit, category, only_available)
 
 
-@router.post("/products", response_model=ProductRead,
+@router.post("", response_model=ProductRead,
              status_code=status.HTTP_201_CREATED, tags=["Products"],
              description='Создание нового товара')
 async def create_product(product: ProductCreate) -> ProductRead:
     return ProductService.create(product)
 
 
-@router.put("/products/{product_id}", response_model=ProductRead,
+@router.put("/{product_id}", response_model=ProductRead,
             tags=["Products"], description='Замена товара')
 async def replace_product(product_id: ProductId,
                           to_replace: ProductCreate) -> ProductRead:
     return ProductService.replace(product_id, to_replace)
 
 
-@router.patch('/products/{product_id}', response_model=ProductRead,
+@router.patch('/{product_id}', response_model=ProductRead,
               tags=["Products"], description='Обновление товара')
 async def update_product(product_id: ProductId,
                          to_update: ProductUpdate) -> ProductRead:
     return ProductService.update(product_id, to_update)
 
 
-@router.delete('/products/{product_id}', tags=["Products"],
+@router.delete('/{product_id}', tags=["Products"],
                status_code=status.HTTP_204_NO_CONTENT,
                description='Удаление товара'
                )
