@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <title>Лекция 4: Структура FastAPI</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+    <h1>Лекция 4: Структура FastAPI</h1>
+    <p>В Products API уже есть CRUD и Pydantic-схемы. Теперь разложим код по модулям и покажем <code>Depends</code> на получении хранилища.</p>
+    <hr>
+
+    <h2>Стартовая точка</h2>
+    <p>В нашем проекте уже созданы <code>main.py</code>, <code>schemas.py</code>, <code>service.py</code> и <code>db.py</code>. Добавим роутер и зависимости.</p>
+    <p>Задача — сделать код понятнее, сохранив прежние методы, параметры и пути <code>/products</code>.</p>
+    <hr>
+
+    <h2>Слои приложения</h2>
+    <pre><code>Запрос → роутер → сервис → хранилище</code></pre>
+    <table>
+      <thead><tr><th>Часть</th><th>Что делает</th></tr></thead>
+      <tbody>
+        <tr><td>Роутер</td><td>Принимает HTTP-параметры и вызывает сервис</td></tr>
+        <tr><td>Сервис</td><td>Выполняет операции с товарами и проверяет правила</td></tr>
+        <tr><td>Хранилище</td><td>Содержит данные; пока это словарь</td></tr>
+        <tr><td>Схемы</td><td>Описывают и проверяют данные запроса и ответа</td></tr>
+      </tbody>
+    </table>
+    <p>Например, проверка итогового товара после PATCH относится к сервису, а путь и статус ответа — к HTTP-слою.</p>
+    <hr>
+
+    <h2>Структура проекта</h2>
+    <pre><code>app/
+├── __init__.py
+├── main.py
+├── schemas.py
+├── service.py
+├── db.py
+├── dependencies.py
+└── routers/
+    ├── __init__.py
+    └── products.py
+</code></pre>
+    <p><code>main.py</code> собирает приложение. <code>dependencies.py</code> выдаёт нужные объекты эндпоинтам. Для пакетов создаём пустые <code>__init__.py</code> и используем импорты от <code>app</code>.</p>
+    <hr>
+
+    <h2>APIRouter</h2>
+    <p>Роутер объединяет эндпоинты одного ресурса. Общий префикс и теги задаём один раз.</p>
+    <p><b><code>app/routers/products.py</code></b></p>
+    <pre class="language-python"><code>from fastapi import APIRouter
+
+router = APIRouter(prefix="/products", tags=["Products"])
+</code></pre>
+    <table>
+      <thead><tr><th>Было</th><th>Станет</th></tr></thead>
+      <tbody>
+        <tr><td><code>@app.get("/products")</code></td><td><code>@router.get("")</code></td></tr>
+        <tr><td><code>@app.get("/products/{product_id}")</code></td><td><code>@router.get("/{product_id}")</code></td></tr>
+      </tbody>
+    </table>
+    <p>Префикс <code>/products</code> и путь операции складываются. Пустой путь <code>""</code> сохраняет URL без завершающего слеша.</p>
+    <hr>
+
+    <h2>Сервис товаров</h2>
+    <p>В <code>app/service.py</code> уже находятся операции с товарами. Сохраняем существующий <code>ProductService</code> со статическими методами.</p>
+    <pre class="language-python"><code>from app.service import ProductService
+
+product = ProductService.get_product_by_id(1)
+</code></pre>
+    <p>Роутер вызывает сервис. Сервис выполняет действие и обращается к хранилищу. Для разделения этих обязанностей не нужно менять сервис на экземпляр класса.</p>
+    <hr>
+
+    <h2>Depends</h2>
+    <p><code>Depends</code> сообщает FastAPI, откуда взять объект для параметра эндпоинта.</p>
+    <p><b><code>app/dependencies.py</code></b></p>
+    <pre class="language-python"><code>from typing import Annotated
+
+from fastapi import Depends
+
+from app.db import fake_db
+
+def get_db() -&gt; dict:
+    return fake_db
+
+
+DbDep = Annotated[dict, Depends(get_db)]
+</code></pre>
+    <p>Передаём функцию <code>get_db</code> без скобок. FastAPI сам вызовет её перед выполнением эндпоинта. Пока вместо настоящей БД получаем наш словарь.</p>
+    <hr>
+
+    <h2>Роутер товаров</h2>
+    <p>Переносим эндпоинты, сохраняя прежние вызовы сервиса. Покажем GET и POST; остальные операции переносятся так же.</p>
+    <p><b><code>app/routers/products.py</code></b></p>
+    <pre class="language-python"><code>from typing import Annotated
+
+from fastapi import APIRouter, Path
+
+from app.schemas import ProductCreate, ProductRead
+from app.service import ProductService
+
+router = APIRouter(prefix="/products", tags=["Products"])
+ProductId = Annotated[int, Path(ge=1)]
+
+
+@router.get("/{product_id}", response_model=ProductRead)
+def get_product(product_id: ProductId):
+    return ProductService.get_product_by_id(product_id)
+
+
+@router.post("", response_model=ProductRead, status_code=201)
+def create_product(data: ProductCreate):
+    return ProductService.create(data)
+</code></pre>
+    <p>Роутер описывает HTTP-контракт, сервис выполняет действие. Для работы со словарём достаточно обычных <code>def</code>.</p>
+    <hr>
+
+    <h2>Сборка приложения</h2>
+    <p>Подключим роутер к FastAPI.</p>
+    <p><b><code>app/main.py</code></b></p>
+    <pre class="language-python"><code>from fastapi import FastAPI
+
+from app.routers import products
+
+app = FastAPI(title="Products API")
+app.include_router(products.router)
+</code></pre>
+    <p>Запуск из корня проекта:</p>
+    <pre class="language-bash"><code>uv run fastapi dev app/main.py</code></pre>
+    <p>Пути сохраняются: <code>/products</code> и <code>/products/{product_id}</code>. Префикс версии API пока не добавляем.</p>
+    <hr>
+
+    <h2>Ошибки сервиса</h2>
+    <p>Сервис сообщает, что товар не найден. Приложение превращает эту ошибку в HTTP 404.</p>
+    <p><b>Добавляем в <code>app/main.py</code></b></p>
+    <pre class="language-python"><code>from fastapi import Request
+from fastapi.responses import JSONResponse
+
+from app.service import ProductNotFoundError
+
+
+@app.exception_handler(ProductNotFoundError)
+async def product_not_found(request: Request, error: ProductNotFoundError):
+    return JSONResponse(status_code=404, content={"detail": "Product not found"})
+</code></pre>
+    <p>Обработчик принимает запрос и исключение и возвращает ответ. <code>HTTPException</code> внутри сервиса не нужен.</p>
+    <p>FastAPI сам возвращает 422 для невалидных входных параметров. Ошибку ручной проверки результата PATCH нужно обработать отдельно: сервис поднимает свою ошибку, а HTTP-слой возвращает 422. Сохраняем товар только после успешной проверки.</p>
+    <hr>
+
+    <h2>Зависимость в эндпоинте</h2>
+    <p>Для демонстрации добавим учебный эндпоинт: он получает хранилище и показывает число записей.</p>
+    <p><b>Добавляем в <code>app/main.py</code></b></p>
+    <pre class="language-python"><code>from app.dependencies import DbDep
+
+
+@app.get("/health")
+def health(db: DbDep):
+    return {"status": "ok", "products_count": len(db)}
+</code></pre>
+    <p>Параметр <code>db</code> получен из <code>get_db()</code>. По умолчанию результат зависимости переиспользуется внутри одного запроса.</p>
+    <p>Getter возвращает существующий словарь. Новый пустой словарь на каждый запрос создавать не нужно.</p>
+    <hr>
+
+    <h2>Lifespan</h2>
+    <p>Некоторые ресурсы создают при старте приложения. Для этого используют lifespan: код до <code>yield</code> выполняется при запуске, после него — при завершении.</p>
+    <p><b>Пример: сохраняем ссылку на хранилище</b></p>
+    <pre class="language-python"><code>from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from app.db import fake_db
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.db = fake_db
+    yield
+</code></pre>
+    <p>При сборке заменяем создание приложения на <code>app = FastAPI(lifespan=lifespan)</code>. Затем подключаем роутер и обработчики, как раньше.</p>
+    <p>В <code>dependencies.py</code> заменяем getter:</p>
+    <pre class="language-python"><code>from fastapi import Request
+
+
+def get_db(request: Request) -&gt; dict:
+    return request.app.state.db
+</code></pre>
+    <p>Новый getter объявляем перед <code>DbDep</code>. Для словаря lifespan необязателен; позже здесь будем открывать и закрывать ресурсы настоящей БД.</p>
+    <hr>
+
+    <h2>Настройки</h2>
+    <p>Значения, которые отличаются между окружениями, удобно вынести в настройки.</p>
+    <pre class="language-bash"><code>uv add pydantic-settings</code></pre>
+    <p><b><code>app/core/config.py</code></b></p>
+    <pre class="language-python"><code>from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    app_name: str = "Products API"
+    debug: bool = False
+
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8",
+    )
+</code></pre>
+    <p>Создайте <code>app/core/__init__.py</code>. В <code>main.py</code> замените создание приложения, прочитав настройки один раз:</p>
+    <pre class="language-python"><code>from app.core.config import Settings
+
+settings = Settings()
+app = FastAPI(title=settings.app_name, debug=settings.debug, lifespan=lifespan)
+</code></pre>
+    <hr>
+
+    <h2>.env</h2>
+    <p>Локальные значения храним в файле <code>.env</code> в корне проекта:</p>
+    <pre class="language-properties"><code>APP_NAME=Products API Local
+DEBUG=false
+</code></pre>
+    <p><code>pydantic-settings</code> прочитает значения и преобразует их по типам. Переменные окружения имеют приоритет над файлом.</p>
+    <p>Добавьте <code>.env</code> в <code>.gitignore</code>. В репозиторий можно положить <code>.env.example</code> с примером настроек без секретов.</p>
+    <hr>
+
+    <h2>Практика</h2>
+    <ol>
+      <li>Перенесите CRUD в <code>routers/products.py</code> и подключите роутер.</li>
+      <li>Сохраните прежние вызовы <code>ProductService</code> из эндпоинтов.</li>
+      <li>Добавьте <code>get_db()</code>, <code>DbDep</code> и учебный эндпоинт <code>/health</code>.</li>
+      <li>Добавьте обработчик <code>ProductNotFoundError</code> и проверьте ответ 404.</li>
+      <li>Проверьте весь CRUD в Swagger UI: прежние пути и фильтры, невалидные данные, PATCH и удаление.</li>
+    </ol>
+    <p>Дополнительно: получайте хранилище из <code>app.state</code> через lifespan и вынесите название приложения и debug в настройки.</p>
+    <hr>
+
+    <h2>Итоги</h2>
+    <ul>
+      <li><code>APIRouter</code> группирует эндпоинты, сервис выполняет операции.</li>
+      <li><code>Depends</code> передаёт хранилище в учебный эндпоинт.</li>
+      <li><code>main.py</code> собирает приложение и связывает его части.</li>
+    </ul>
+    <p>На следующей лекции используем зависимости для получения текущего пользователя и проверки доступа.</p>
+    <p>Материалы: <a href="https://fastapi.tiangolo.com/tutorial/bigger-applications/">APIRouter</a>, <a href="https://fastapi.tiangolo.com/tutorial/dependencies/">Depends</a>, <a href="https://fastapi.tiangolo.com/advanced/events/">lifespan</a>, <a href="https://fastapi.tiangolo.com/advanced/settings/">настройки</a>.</p>
+    <hr>
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>
