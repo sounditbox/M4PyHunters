@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.db import fake_db
-from app.schemas import ProductRead, ProductCreate
+from app.schemas import ProductRead, ProductCreate, ProductUpdate
 
 
 class ServiceError(Exception):
@@ -53,10 +53,13 @@ class ProductService:
         return product
 
     @staticmethod
-    def update(product_id, to_update) -> ProductRead:
-        product = ProductService.get_product_by_id(product_id)
-        product.update(to_update.model_dump(exclude_unset=True))
-        return product
+    def update(product_id: int, to_update: ProductUpdate) -> ProductRead:
+        product: ProductRead = ProductService.get_product_by_id(product_id)
+        to_validate = (product.model_dump(exclude=['id']) |
+                       to_update.model_dump(exclude_unset=True))
+        validated = ProductRead.model_validate(to_validate)
+        fake_db[product_id] = validated.model_dump()
+        return validated
 
     @staticmethod
     def delete(product_id: int) -> ProductRead:

@@ -1,6 +1,4 @@
 import logging
-import time
-from time import perf_counter
 from typing import Annotated
 
 from fastapi import FastAPI
@@ -61,14 +59,14 @@ async def create_product(product: ProductCreate) -> ProductRead:
 @app.put("/products/{product_id}", response_model=ProductRead,
          tags=["Products"], description='Замена товара')
 async def replace_product(product_id: ProductId,
-                    to_replace: ProductCreate) -> ProductRead:
+                          to_replace: ProductCreate) -> ProductRead:
     return ProductService.replace(product_id, to_replace)
 
 
 @app.patch('/products/{product_id}', response_model=ProductRead,
            tags=["Products"], description='Обновление товара')
 async def update_product(product_id: ProductId,
-                   to_update: ProductUpdate) -> ProductRead:
+                         to_update: ProductUpdate) -> ProductRead:
     return ProductService.update(product_id, to_update)
 
 
