@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI, HTTPException
 from starlette import status
 
+from app.db import DbDep
 from app.routers import product
 from app.services.product import ProductNotFoundError
 
@@ -13,6 +14,11 @@ app = FastAPI(
     description="Учебное API",
     version="0.2.1",
 )
+
+
+@app.get("/health")
+def health(db: DbDep):
+    return {"status": "ok", "products_count": len(db)}
 
 
 @app.exception_handler(ProductNotFoundError)
