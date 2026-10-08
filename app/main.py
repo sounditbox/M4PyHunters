@@ -1,18 +1,18 @@
-import logging
 
 from fastapi import FastAPI, HTTPException
 from starlette import status
 
 from app.db import DbDep
+from app.lifespan import lifespan
 from app.routers import product
 from app.services.product import ProductNotFoundError
 
-logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
     title="Products API",
     description="Учебное API",
     version="0.2.1",
+    lifespan=lifespan
 )
 
 
