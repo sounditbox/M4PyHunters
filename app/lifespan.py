@@ -14,7 +14,8 @@ logger = logging.getLogger("lifespan")
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("App starting up...")
-
     app.state.db = fake_db
-    yield  # actual app startup
+
+    yield
+
     logger.info("App shutting down...")
