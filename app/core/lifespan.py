@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.db import fake_db
+from app.db.fake_db import fake_db
 from app.core.logging_conf import configure_logging
 
 logger = logging.getLogger("lifespan")

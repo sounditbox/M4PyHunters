@@ -32,7 +32,7 @@ def get_products(
 
 
 def create(product: ProductCreate, db: dict) -> ProductRead:
-    next_id = max(db.keys()) + 1
+    next_id = max(db.keys(), default=0) + 1
     product_dict: dict = product.model_dump()
     product_dict["id"] = next_id
     db[next_id] = product_dict

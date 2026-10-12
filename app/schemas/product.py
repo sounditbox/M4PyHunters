@@ -68,7 +68,7 @@ class ProductRead(ProductBase):
     id: int = Field(ge=1)
 
 
-class ProductUpdate(ProductBase):
+class ProductUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=3, max_length=80)
     category: str | None = Field(default=None, min_length=2, max_length=40)
     price: float | None = Field(default=None, gt=0)

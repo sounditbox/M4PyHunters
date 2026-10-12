@@ -1,6 +1,7 @@
 
 from fastapi import FastAPI, HTTPException
 from starlette import status
+from starlette.responses import JSONResponse
 
 from app.db.fake_db import DbDep
 from app.core.config import get_settings
@@ -26,9 +27,8 @@ def create_app():
 
     @app.exception_handler(ProductNotFoundError)
     async def product_not_found():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
-                            detail="Product not found")
-
+        return JSONResponse(status_code=status.HTTP_404_NOT_FOUND,
+                            content={"detail": "Product not found"})
     return app
 
 
