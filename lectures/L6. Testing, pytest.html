@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <title>Лекция 6: Тесты с pytest</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+    <h1>Лекция 6: Тесты с pytest</h1>
+    <p>Добавим автоматические проверки в наш Products API. Проверим товары, вход и права пользователя.</p>
+    <p>Тесты будем запускать без отдельного сервера через <code>TestClient</code>.</p>
+    <hr>
+
+    <h2>Наш проект</h2>
+    <pre><code>app/
+├── main.py                # create_app(), /health
+├── core/                  # config.py, lifespan.py, security.py
+├── db/                    # fake_db.py, fake_users.py
+├── dependencies/          # db.py, settings.py, auth.py
+├── routers/               # product.py, auth.py
+├── schemas/               # product.py, auth.py
+└── services/              # product.py, auth.py
+</code></pre>
+    <p>Товары и пользователи хранятся в словарях. При старте <code>lifespan</code> создаёт отдельные копии в <code>app.state</code>.</p>
+    <p>В текущем коде чтение <code>/products</code> тоже требует токен. Изменять товары может только <code>admin</code>. Вход: <code>/auth/token</code>, профиль: <code>/auth/me</code>.</p>
+    <hr>
+
+    <h2>pytest</h2>
+    <pre class="language-bash"><code>uv add --dev pytest
+</code></pre>
+    <p><code>pytest</code> находит функции <code>test_*</code> в файлах <code>test_*.py</code> и выполняет их. HTTP-клиент уже установлен вместе с <code>fastapi[standard]</code>.</p>
+    <p>Создаём каталог <code>tests/</code>. В <code>pyproject.toml</code> добавляем:</p>
+    <pre class="language-toml" data-file="pyproject.toml" data-mode="append"><code>[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+</code></pre>
+    <p>Тесты запускаем из корня проекта командой <code>uv run pytest</code>. <code>pythonpath</code> позволяет импортировать пакет <code>app</code>.</p>
+    <hr>
+
+    <h2>Тестовые настройки</h2>
+    <p><b>Начало нового <code>tests/conftest.py</code></b></p>
+    <pre class="language-python" data-file="tests/conftest.py" data-mode="replace"><code>import os
+
+os.environ.update(
+    DEBUG="false",
+    SECRET_KEY="test-" + "x" * 64,
+    ADMIN_PASSWORD="admin-pass",
+    USER_PASSWORD="user-pass",
+)
+</code></pre>
+    <p>Задаём отдельные учебные значения до импорта <code>app.main</code>: <code>fake_users.py</code> читает настройки и хэширует пароли при импорте.</p>
+    <p>Переменные окружения имеют приоритет над <code>.env</code>. Файл <code>.env</code> менять не нужно. Ключ соответствует ограничению <code>min_length=64</code>.</p>
+    <hr>
+
+    <h2>Фикстура клиента</h2>
+    <p><b>Продолжение <code>tests/conftest.py</code>, после тестовых настроек</b></p>
+    <pre class="language-python" data-file="tests/conftest.py" data-mode="append"><code>import pytest
+from fastapi.testclient import TestClient
+from app.main import create_app
+
+
+@pytest.fixture
+def client():
+    with TestClient(create_app()) as test_client:
+        yield test_client
+</code></pre>
+    <p>Фикстура готовит объект для теста. Pytest сам подставляет её по имени аргумента <code>client</code>. Импортировать <code>conftest.py</code> в тестах не нужно.</p>
+    <p>Для каждого теста создаётся новый клиент. Вход в <code>with</code> запускает lifespan, выход завершает его. <code>yield</code> передаёт клиент тесту.</p>
+    <hr>
+
+    <h2>Первый тест</h2>
+    <p><b>Новый <code>tests/test_health.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_health.py" data-mode="replace"><code>def test_health(client):
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "products_count": 5,
+    }
+</code></pre>
+    <p>В <code>fake_db</code> пять товаров. Проверяем статус и JSON ответа. Если условие в <code>assert</code> ложно, pytest покажет различие.</p>
+    <p><code>TestClient</code> вызывает приложение внутри процесса. Даже для наших <code>async def</code> эндпоинтов тест пишем обычной функцией <code>def</code>.</p>
+    <hr>
+
+    <h2>Вход</h2>
+    <p><b>Новый <code>tests/test_auth.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_auth.py" data-mode="replace"><code>def test_login(client):
+    response = client.post(
+        "/auth/token",
+        data={"username": "admin", "password": "admin-pass"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token_type"] == "bearer"
+    assert body["access_token"]
+</code></pre>
+    <p>Вход принимает форму, поэтому используем <code>data=</code>. Для JSON-тела товара будем использовать <code>json=</code>.</p>
+    <hr>
+
+    <h2>Токен для тестов</h2>
+    <p><b>Продолжение <code>tests/conftest.py</code></b></p>
+    <pre class="language-python" data-file="tests/conftest.py" data-mode="append"><code>@pytest.fixture
+def admin_headers(client):
+    response = client.post(
+        "/auth/token",
+        data={"username": "admin", "password": "admin-pass"},
+    )
+    assert response.status_code == 200
+    token = response.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+</code></pre>
+    <p>Фикстура может зависеть от другой фикстуры. <code>admin_headers</code> выполняет вход через тот же <code>client</code>, который получает тест.</p>
+    <p>В примерах используем настоящую выдачу и проверку JWT.</p>
+    <hr>
+
+    <h2>Список товаров</h2>
+    <p><b>Новый <code>tests/test_products.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_products.py" data-mode="replace"><code>def test_list_products(client, admin_headers):
+    response = client.get("/products", headers=admin_headers)
+
+    assert response.status_code == 200
+    assert [p["id"] for p in response.json()] == [1, 3, 5]
+
+    response = client.get(
+        "/products",
+        params={"only_available": False},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    assert len(response.json()) == 5
+</code></pre>
+    <p>По умолчанию <code>only_available=True</code>, поэтому API возвращает три доступных товара. Через <code>params</code> передаём query-параметры.</p>
+    <hr>
+
+    <h2>Создание товара</h2>
+    <p><b>Продолжение <code>tests/test_products.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_products.py" data-mode="append"><code>def test_create_product(client, admin_headers):
+    response = client.post(
+        "/products",
+        json={"name": "Gaming Mouse", "category": "electronics", "price": 49.9},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["id"] == 6
+    assert body["name"] == "Gaming Mouse"
+    assert body["price"] == 49.9
+
+    saved = client.get(f"/products/{body['id']}", headers=admin_headers)
+    assert saved.status_code == 200
+    assert saved.json() == body
+</code></pre>
+    <p>Проверяем и ответ POST, и сохранение товара через GET. ID равен 6, потому что в свежем словаре уже есть товары с ID от 1 до 5.</p>
+    <hr>
+
+    <h2>Обновление товара</h2>
+    <p><b>Продолжение <code>tests/test_products.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_products.py" data-mode="append"><code>def test_update_product(client, admin_headers):
+    response = client.patch(
+        "/products/1",
+        json={"price": 99.9},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["price"] == 99.9
+    assert response.json()["name"] == "Product 1"
+
+    saved = client.get("/products/1", headers=admin_headers)
+    assert saved.status_code == 200
+    assert saved.json()["price"] == 99.9
+</code></pre>
+    <p>PATCH меняет переданное поле и сохраняет прежнее название. Тест использует свою копию начальных данных.</p>
+    <hr>
+
+    <h2>Удаление товара</h2>
+    <p><b>Продолжение <code>tests/test_products.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_products.py" data-mode="append"><code>def test_delete_product(client, admin_headers):
+    response = client.delete("/products/1", headers=admin_headers)
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+    response = client.get("/products/1", headers=admin_headers)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Product not found"}
+</code></pre>
+    <p>У ответа 204 нет тела. Повторное чтение проверяет удаление и наш обработчик <code>ProductNotFoundError</code>.</p>
+    <hr>
+
+    <h2>Валидация</h2>
+    <p><b>В начало <code>tests/test_products.py</code> добавляем импорт, затем дописываем тест</b></p>
+    <pre class="language-python" data-file="tests/test_products.py" data-mode="append-import"><code>import pytest
+</code></pre>
+    <pre class="language-python" data-file="tests/test_products.py" data-mode="append"><code>@pytest.mark.parametrize("price", [0, -1])
+def test_invalid_price(client, admin_headers, price):
+    response = client.post(
+        "/products",
+        json={"name": "Gaming Mouse", "category": "electronics", "price": price},
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 422
+    errors = response.json()["detail"]
+    assert any(error["loc"] == ["body", "price"] for error in errors)
+</code></pre>
+    <p><code>parametrize</code> запускает один тест два раза. Проверяем поле с ошибкой: цена должна быть больше нуля.</p>
+    <hr>
+
+    <h2>Нет токена</h2>
+    <p><b>В начало <code>tests/test_auth.py</code> добавляем импорт, затем дописываем тест</b></p>
+    <pre class="language-python" data-file="tests/test_auth.py" data-mode="append-import"><code>import pytest
+</code></pre>
+    <pre class="language-python" data-file="tests/test_auth.py" data-mode="append"><code>@pytest.mark.parametrize("path", ["/auth/me", "/products", "/products/1"])
+def test_token_required(client, path):
+    response = client.get(path)
+
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+</code></pre>
+    <p>Три защищённых маршрута возвращают 401 без заголовка авторизации.</p>
+    <hr>
+
+    <h2>Неверный пароль</h2>
+    <p><b>Продолжение <code>tests/test_auth.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_auth.py" data-mode="append"><code>@pytest.mark.parametrize("username", ["admin", "unknown"])
+def test_invalid_login(client, username):
+    response = client.post(
+        "/auth/token",
+        data={"username": username, "password": "wrong-password"},
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Неверные учётные данные"}
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+</code></pre>
+    <p>Неверный пароль и неизвестный логин дают одинаковую ошибку.</p>
+    <hr>
+
+    <h2>Права пользователя</h2>
+    <p><b>Продолжение <code>tests/test_auth.py</code></b></p>
+    <pre class="language-python" data-file="tests/test_auth.py" data-mode="append"><code>def test_user_cannot_create_product(client):
+    login = client.post(
+        "/auth/token",
+        data={"username": "user", "password": "user-pass"},
+    )
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    profile = client.get("/auth/me", headers=headers)
+    assert profile.status_code == 200
+    assert profile.json()["role"] == "user"
+    assert "hashed_password" not in profile.json()
+
+    response = client.post(
+        "/products",
+        json={"name": "Gaming Mouse", "category": "electronics", "price": 49.9},
+        headers=headers,
+    )
+    assert response.status_code == 403
+</code></pre>
+    <p>Пользователь успешно входит и получает профиль, но создание товара требует роль <code>admin</code>.</p>
+    <hr>
+
+    <h2>Запуск</h2>
+    <pre class="language-bash"><code>uv run pytest -v
+uv run pytest tests/test_products.py
+uv run pytest tests/test_auth.py::test_login
+</code></pre>
+    <p>Первая команда запускает весь набор, вторая один файл, третья один тест.</p>
+    <pre><code>tests/
+├── conftest.py
+├── test_health.py
+├── test_products.py
+└── test_auth.py
+</code></pre>
+    <p>Каждый тест должен проходить отдельно. Если результат зависит от порядка, проверяем, не используются ли общие изменяемые данные.</p>
+    <hr>
+
+    <h2>Практика</h2>
+    <p>Сначала собираем примеры и запускаем весь набор. Затем добавляем несколько проверок самостоятельно:</p>
+    <ol>
+      <li>PUT заменяет товар и возвращает новые значения.</li>
+      <li>Фильтр <code>category=category1</code> возвращает товары с ID 1 и 5.</li>
+      <li>Повреждённый Bearer-токен даёт 401 на <code>/auth/me</code>.</li>
+      <li>Обычный пользователь читает товары, но не может удалить товар.</li>
+    </ol>
+    <p>Для каждого теста выбираем понятное имя и проверяем ожидаемый статус и результат.</p>
+    <hr>
+
+    <h2>Итоги</h2>
+    <ul>
+      <li><code>pytest</code> запускает тесты и проверяет <code>assert</code>.</li>
+      <li><code>TestClient</code> отправляет запросы приложению без Uvicorn.</li>
+      <li>Фикстуры дают каждому тесту клиент и свежие данные.</li>
+      <li>Тесты проверяют товары, валидацию, вход и права.</li>
+    </ul>
+    <p>Дальше подключим базу данных. Эти проверки помогут сохранить поведение API при замене словаря.</p>
+    <p>Материалы: <a href="https://fastapi.tiangolo.com/tutorial/testing/">FastAPI: тесты</a>, <a href="https://fastapi.tiangolo.com/advanced/testing-events/">FastAPI: lifespan в тестах</a>, <a href="https://docs.pytest.org/en/stable/how-to/fixtures.html">pytest: фикстуры</a>, <a href="https://docs.pytest.org/en/stable/how-to/parametrize.html">pytest: параметризация</a>.</p>
+    <hr>
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>

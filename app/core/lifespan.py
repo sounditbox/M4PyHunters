@@ -1,6 +1,7 @@
 import logging
 
 from contextlib import asynccontextmanager
+from copy import deepcopy
 
 from fastapi import FastAPI
 
@@ -15,8 +16,8 @@ logger = logging.getLogger("lifespan")
 async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("App starting up...")
-    app.state.db = fake_db
-    app.state.users = fake_users
+    app.state.db = deepcopy(fake_db)
+    app.state.users = deepcopy(fake_users)
 
     yield
 

@@ -26,7 +26,7 @@ def create_app():
         return {"status": "ok", "products_count": len(db)}
 
     @app.exception_handler(ProductNotFoundError)
-    async def product_not_found():
+    async def product_not_found(request, exc):
         return JSONResponse(status_code=status.HTTP_404_NOT_FOUND,
                             content={"detail": "Product not found"})
     return app
