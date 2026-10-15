@@ -50,6 +50,25 @@ def test_update_product(client, admin_headers):
     assert saved.json()["price"] == 99.9
 
 
+def test_replace_product(client, admin_headers):
+    replacement = {"name": "Product 42", "category": "electronics",
+                   "price": 1234,
+                   "description": "Product 1 super description",
+                   "is_available": False, "specs": None, "sale_price": None}
+
+    response = client.put(
+        '/products/1',
+        json=replacement,
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == replacement | {"id": 1}
+
+    saved = client.get("/products/1", headers=admin_headers)
+    assert saved.status_code == 200
+    assert saved.json() == replacement | {"id": 1}
+
+
 def test_delete_product(client, admin_headers):
     response = client.delete("/products/1", headers=admin_headers)
 
