@@ -1,6 +1,3 @@
-from typing import Annotated
-
-from fastapi import Depends
 from starlette.requests import Request
 
 fake_db = {
@@ -27,4 +24,3 @@ async def get_db(request: Request) -> dict:
     return request.app.state.db
 
 
-DbDep = Annotated[dict, Depends(get_db)]

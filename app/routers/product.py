@@ -3,7 +3,8 @@ from typing import Annotated
 from fastapi import Path, Query, APIRouter
 from starlette import status
 
-from app.db.fake_db import DbDep
+from app.dependencies.auth import CurrentUserDep, AdminUserDep
+from app.dependencies.db import DbDep
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 from app.services.product import (
     get_product_by_id, get_products, create,
@@ -29,7 +30,8 @@ router = APIRouter(prefix='/products', tags=['Products'])
 
 @router.get("/{product_id}", response_model=ProductRead,
             description='Получение товара по ID')
-async def get_product(product_id: ProductId, db: DbDep) -> ProductRead:
+async def get_product(product_id: ProductId, db: DbDep,
+                      user: CurrentUserDep) -> ProductRead:
     return get_product_by_id(product_id, db)
 
 
@@ -37,6 +39,7 @@ async def get_product(product_id: ProductId, db: DbDep) -> ProductRead:
             description='Получение списка товаров')
 async def list_products(
         db: DbDep,
+        user: CurrentUserDep,
         search: SearchParam = None,
         limit: LimitParam = 10,
         category: CategoryParam = None,
@@ -50,26 +53,30 @@ async def list_products(
 @router.post("", response_model=ProductRead,
              status_code=status.HTTP_201_CREATED,
              description='Создание нового товара')
-async def create_product(product: ProductCreate, db: DbDep) -> ProductRead:
+async def create_product(product: ProductCreate, db: DbDep,
+                         _admin: AdminUserDep) -> ProductRead:
     return create(product, db)
 
 
 @router.put("/{product_id}", response_model=ProductRead,
             description='Замена товара')
 async def replace_product(product_id: ProductId,
-                          to_replace: ProductCreate, db: DbDep) -> ProductRead:
+                          to_replace: ProductCreate, db: DbDep,
+                          _admin: AdminUserDep) -> ProductRead:
     return replace(product_id, to_replace, db)
 
 
 @router.patch('/{product_id}', response_model=ProductRead,
               description='Обновление товара')
 async def update_product(product_id: ProductId,
-                         to_update: ProductUpdate, db: DbDep) -> ProductRead:
+                         to_update: ProductUpdate, db: DbDep,
+                         _admin: AdminUserDep) -> ProductRead:
     return update(product_id, to_update, db)
 
 
 @router.delete('/{product_id}', status_code=status.HTTP_204_NO_CONTENT,
                description='Удаление товара'
                )
-async def delete_product(product_id: ProductId, db: DbDep) -> None:
+async def delete_product(product_id: ProductId, db: DbDep,
+                         _admin: AdminUserDep) -> None:
     delete(product_id, db)

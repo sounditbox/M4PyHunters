@@ -1,12 +1,11 @@
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from starlette import status
 from starlette.responses import JSONResponse
 
-from app.db.fake_db import DbDep
 from app.core.config import get_settings
 from app.core.lifespan import lifespan
-from app.routers import product
+from app.dependencies.db import DbDep
+from app.routers import product, auth
 from app.services.product import ProductNotFoundError
 
 
@@ -20,6 +19,7 @@ def create_app():
         debug=settings.debug
     )
     app.include_router(product.router)
+    app.include_router(auth.router)
 
     @app.get("/health")
     def health(db: DbDep):

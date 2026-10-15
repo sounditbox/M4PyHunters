@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>mermaid.initialize({ startOnLoad: true });</script>
+  <style>
+.token-visuals {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 24px;
+      align-items: start;
+      margin: 18px 0;
+    }
+
+    .token-visual {
+      text-align: center;
+    }
+
+    .token-visual img {
+      max-width: 100%;
+      max-height: 320px;
+      height: auto;
+      object-fit: contain;
+    }
+
+    .token-visual p {
+      margin-top: 8px;
+      font-weight: 700;
+    }
+
+    .jwt-diagram {
+      margin: 18px 0;
+    }
+  </style>
+  <title>Лекция 5: Аутентификация и JWT в Products API</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+
+    <h1>Лекция 5: Аутентификация и JWT в Products API</h1>
+    <p>За два часа добавим вход, профиль пользователя и права администратора. Продолжаем существующий проект с товарами в словаре.</p>
+    <p>Результат: все читают товары, пользователь смотрит свой профиль, администратор изменяет товары.</p>
+    <hr>
+    <h2>Стартовый проект</h2>
+<p>Уже есть <code>create_app()</code>, <code>DbDep</code>, <code>SettingsDep</code> и функции CRUD.</p>
+<pre><code>app/
+├── main.py
+├── core/          # config.py, lifespan.py, logging_conf.py
+├── db/            # fake_db.py
+├── schemas/       # product.py
+├── services/      # product.py
+└── routers/       # product.py
+</code></pre>
+<p>Добавим файлы аутентификации в эти пакеты и новый пакет <code>dependencies/</code>. В нём создаём пустой <code>__init__.py</code>.</p>
+<p>Пути товаров сохраняем: <code>/products</code>. Для входа используем <code>/auth/token</code>, для профиля <code>/auth/me</code>.</p>
+    <hr>
+
+    <h2>Аутентификация и права</h2>
+<table>
+  <thead><tr><th>Проверка</th><th>Вопрос</th><th>Пример</th></tr></thead>
+  <tbody>
+    <tr><td>Аутентификация</td><td>Кто выполняет запрос?</td><td>Проверяем пароль или токен.</td></tr>
+    <tr><td>Авторизация</td><td>Что ему разрешено?</td><td>Изменять товары может администратор.</td></tr>
+  </tbody>
+</table>
+<p><b>401</b>: нет действительного токена или неверный пароль.</p>
+<p><b>403</b>: пользователь известен, но у него нет права на действие.</p>
+<p>GET товаров публичный. POST, PUT, PATCH и DELETE требуют роль <code>admin</code>.</p>
+    <hr>
+
+    <h2>Как работает вход</h2>
+<ol>
+  <li>Клиент отправляет логин и пароль на <code>POST /auth/token</code>.</li>
+  <li>Сервер проверяет пароль по хэшу и возвращает JWT.</li>
+  <li>Клиент передаёт <code>Authorization: Bearer &lt;token&gt;</code>.</li>
+  <li>Сервер проверяет токен и находит пользователя.</li>
+  <li>Для изменения товара сервер дополнительно проверяет роль.</li>
+</ol>
+<p>Пароль нужен при входе. Последующие запросы используют токен.</p>
+<p>Здесь password flow служит учебным примером FastAPI. Для новых промышленных OAuth2-систем RFC 9700 запрещает этот grant. Обычный вариант OAuth2-входа: Authorization Code с PKCE.</p>
+    <hr>
+
+    <h2>JWT: что нужно знать</h2>
+<pre><code>header.payload.signature</code></pre>
+<div class="mermaid jwt-diagram">
+graph TD
+  A["JWT token"] --> B["Header"]
+  A --> C["Payload"]
+  A --> D["Signature"]
+  B -- "содержит" --> B1["alg: HS256"]
+  B -- "содержит" --> B2["typ: JWT"]
+  C -- "содержит" --> C1["sub: admin"]
+  C -- "содержит" --> C2["exp: 1782048000"]
+  D -- "создаётся из" --> H["Header + '.' + Payload"]
+  D -- "подписывается" --> S["Секретный ключ"]
+
+  style D fill:#cfc,stroke:#333
+    </div>
+<p><code>sub</code> хранит логин пользователя, <code>exp</code> хранит срок действия. Подпись позволяет проверить, что токен выдал наш сервер.</p>
+<p>Содержимое JWT можно прочитать. Пароли и секреты в токен не помещаем. После истечения токена пользователь входит заново.</p>
+    <hr>
+
+    <h2>Зависимости и секрет</h2>
+<pre class="language-bash"><code>uv add pydantic-settings pyjwt "pwdlib[argon2]" python-multipart
+</code></pre>
+<p>PyJWT работает с токенами, pwdlib проверяет пароли, python-multipart разбирает форму входа.</p>
+<p>Генерируем секрет:</p>
+<pre class="language-bash"><code>uv run python -c "import secrets; print(secrets.token_hex(32))"
+</code></pre>
+<p>Добавляем в существующий <code>.env</code>:</p>
+<pre class="language-properties"><code>JWT_SECRET_KEY=replace-with-generated-value
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+ADMIN_PASSWORD=admin-pass
+USER_PASSWORD=user-pass
+</code></pre>
+<p>Заменяем текст ключа сгенерированной строкой из 64 символов. Пароли учебных пользователей тоже читаем из <code>.env</code>. В <code>.env.example</code> оставляем ключ и пароли пустыми. <code>.env</code> уже исключён из Git.</p>
+    <hr>
+
+    <h2>Настройки JWT</h2>
+<p>В <code>app/core/config.py</code> добавляем импорт:</p>
+<pre class="language-python" data-file="app/core/config.py" data-mode="append-import"><code>from pydantic import Field, SecretStr
+</code></pre>
+<p>В существующий класс <code>Settings</code> добавляем настройки JWT и пароли учебных пользователей:</p>
+<pre class="language-python" data-file="app/core/config.py" data-mode="append-settings-fields"><code>jwt_secret_key: SecretStr = Field(min_length=64)
+access_token_expire_minutes: int = Field(default=30, gt=0)
+admin_password: SecretStr = Field(min_length=8)
+user_password: SecretStr = Field(min_length=8)
+</code></pre>
+<p>Остальные настройки, <code>model_config</code>, <code>get_settings()</code> и <code>SettingsDep</code> сохраняем.</p>
+<p><code>SecretStr</code> скрывает ключ и пароли при выводе настроек. После изменения <code>.env</code> перезапускаем сервер.</p>
+    <hr>
+
+    <h2>Схемы пользователя и токена</h2>
+<p><b>Новый <code>app/schemas/auth.py</code></b></p>
+<pre class="language-python" data-file="app/schemas/auth.py" data-mode="replace"><code>from typing import Literal
+from pydantic import BaseModel
+
+
+class UserRead(BaseModel):
+    id: int
+    username: str
+    role: Literal["user", "admin"] = "user"
+    disabled: bool = False
+
+
+class UserInDB(UserRead):
+    hashed_password: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+</code></pre>
+<p>Хранилище использует <code>UserInDB</code>. В ответах показываем <code>UserRead</code>, поэтому хэш пароля не попадёт клиенту.</p>
+    <hr>
+
+    <h2>Хэширование пароля</h2>
+<p><b>Начало нового <code>app/core/security.py</code></b></p>
+<pre class="language-python" data-file="app/core/security.py" data-mode="replace"><code>from pwdlib import PasswordHash
+
+password_hash = PasswordHash.recommended()
+DUMMY_HASH = password_hash.hash("not-a-real-password")
+
+
+def hash_password(password: str) -&gt; str:
+    return password_hash.hash(password)
+
+
+def verify_password(password: str, stored_hash: str) -&gt; bool:
+    return password_hash.verify(password, stored_hash)
+</code></pre>
+<p><code>hash_password()</code> создаёт Argon2-хэш. <code>verify_password()</code> проверяет введённый пароль по сохранённому хэшу.</p>
+<p><code>DUMMY_HASH</code> используем для неизвестного логина, чтобы тоже выполнить проверку пароля.</p>
+    <hr>
+
+    <h2>Два учебных пользователя</h2>
+<p><b>Начало нового <code>app/db/fake_users.py</code></b></p>
+<pre class="language-python" data-file="app/db/fake_users.py" data-mode="replace"><code>from typing import Annotated
+from fastapi import Depends, Request
+from app.core.config import get_settings
+from app.core.security import hash_password
+from app.schemas.auth import UserInDB
+
+settings = get_settings()
+
+fake_users = {
+    "admin": UserInDB(
+        id=1, username="admin", role="admin",
+        hashed_password=hash_password(settings.admin_password.get_secret_value()),
+    ),
+    "user": UserInDB(
+        id=2, username="user", role="user",
+        hashed_password=hash_password(settings.user_password.get_secret_value()),
+    ),
+}
+</code></pre>
+<p>Пароли получаем из настроек и передаём в <code>hash_password()</code>. В словаре пользователей сохраняем только хэши. После изменения паролей в <code>.env</code> перезапускаем сервер.</p>
+    <hr>
+
+    <h2>Пользователи через Depends</h2>
+<p><b>Продолжение <code>app/db/fake_users.py</code></b></p>
+<pre class="language-python" data-file="app/db/fake_users.py" data-mode="append"><code>def get_users(request: Request) -&gt; dict[str, UserInDB]:
+    return request.app.state.users
+
+
+UsersDep = Annotated[dict[str, UserInDB], Depends(get_users)]
+</code></pre>
+<p>Зависимость устроена так же, как существующая <code>DbDep</code>. Она получает готовый словарь из <code>app.state</code>.</p>
+<p>В <code>app/core/lifespan.py</code> добавляем импорты:</p>
+<pre class="language-python" data-file="app/core/lifespan.py" data-mode="append-import"><code>from copy import deepcopy
+from app.db.fake_users import fake_users
+</code></pre>
+<p>Перед <code>yield</code> сохраняем оба словаря:</p>
+<pre class="language-python" data-file="app/core/lifespan.py" data-mode="replace-state-setup"><code>app.state.db = deepcopy(fake_db)
+app.state.users = deepcopy(fake_users)
+</code></pre>
+<p>Логирование и декоратор lifespan сохраняем. Перезапуск приложения сбрасывает учебные данные.</p>
+    <hr>
+
+    <h2>Проверка логина и пароля</h2>
+<p><b>Новый <code>app/services/auth.py</code></b></p>
+<pre class="language-python" data-file="app/services/auth.py" data-mode="replace"><code>from app.core.security import DUMMY_HASH, verify_password
+from app.schemas.auth import UserInDB
+
+
+def authenticate_user(
+    users: dict[str, UserInDB], username: str, password: str,
+) -&gt; UserInDB | None:
+    user = users.get(username)
+    stored_hash = user.hashed_password if user else DUMMY_HASH
+    valid = verify_password(password, stored_hash)
+    if user is None or not valid:
+        return None
+    return user
+</code></pre>
+<p>Сервис возвращает пользователя или <code>None</code>. Роутер превратит неудачный вход в одинаковый ответ 401 для неизвестного логина и неверного пароля.</p>
+    <hr>
+
+    <h2>Создание JWT</h2>
+<p><b>Продолжение <code>app/core/security.py</code></b></p>
+<pre class="language-python" data-file="app/core/security.py" data-mode="append"><code>from datetime import datetime, timedelta, timezone
+import jwt
+from app.core.config import Settings
+
+
+def create_access_token(username: str, settings: Settings) -&gt; str:
+    payload = {
+        "sub": username,
+        "exp": datetime.now(timezone.utc) + timedelta(
+            minutes=settings.access_token_expire_minutes,
+        ),
+    }
+    return jwt.encode(
+        payload, settings.jwt_secret_key.get_secret_value(),
+        algorithm="HS256",
+    )
+</code></pre>
+<p>Токен хранит логин и срок действия. Алгоритм HS256 фиксируем в коде, ключ и срок берём из настроек.</p>
+    <hr>
+
+    <h2>Проверка JWT</h2>
+<p><b>Продолжение <code>app/core/security.py</code></b></p>
+<pre class="language-python" data-file="app/core/security.py" data-mode="append"><code>def decode_access_token(token: str, settings: Settings) -&gt; str:
+    payload = jwt.decode(
+        token, settings.jwt_secret_key.get_secret_value(),
+        algorithms=["HS256"],
+        options={"require": ["sub", "exp"]},
+    )
+    return payload["sub"]
+</code></pre>
+<p>PyJWT проверяет подпись и срок. <code>require</code> требует оба поля. Функция возвращает логин, чтобы найти пользователя.</p>
+<p>Роль читаем из хранилища при каждом запросе. В JWT её не записываем.</p>
+    <hr>
+
+    <h2>Bearer token и ошибка 401</h2>
+<p><b>Начало нового <code>app/dependencies/auth.py</code></b></p>
+<pre class="language-python" data-file="app/dependencies/auth.py" data-mode="replace"><code>from typing import Annotated
+from fastapi import Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from jwt.exceptions import InvalidTokenError
+from app.core.config import SettingsDep
+from app.core.security import decode_access_token
+from app.db.fake_users import UsersDep
+from app.schemas.auth import UserRead
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
+TokenDep = Annotated[str, Depends(oauth2_scheme)]
+
+
+def invalid_credentials() -&gt; HTTPException:
+    return HTTPException(
+        status_code=401, detail="Неверные учётные данные",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+</code></pre>
+<p><code>OAuth2PasswordBearer</code> извлекает токен из заголовка и добавляет Authorize в Swagger UI. <code>tokenUrl</code> указывает на наш endpoint входа.</p>
+    <hr>
+
+    <h2>Текущий пользователь</h2>
+<p><b>Продолжение <code>app/dependencies/auth.py</code></b></p>
+<pre class="language-python" data-file="app/dependencies/auth.py" data-mode="append"><code>def get_current_user(
+    token: TokenDep, users: UsersDep, settings: SettingsDep,
+) -&gt; UserRead:
+    try:
+        username = decode_access_token(token, settings)
+    except (InvalidTokenError, ValueError, TypeError):
+        raise invalid_credentials() from None
+    user = users.get(username)
+    if user is None:
+        raise invalid_credentials()
+    if user.disabled:
+        raise HTTPException(status_code=403, detail="Пользователь заблокирован")
+    return UserRead(**user.model_dump())
+
+
+CurrentUserDep = Annotated[UserRead, Depends(get_current_user)]
+</code></pre>
+<p>Одна зависимость проверяет токен, существование пользователя и блокировку. Возвращает публичную модель без хэша.</p>
+    <hr>
+
+    <h2>Права администратора</h2>
+<p><b>Завершение <code>app/dependencies/auth.py</code></b></p>
+<pre class="language-python" data-file="app/dependencies/auth.py" data-mode="append"><code>def require_admin(user: CurrentUserDep) -&gt; UserRead:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Недостаточно прав")
+    return user
+
+
+AdminUserDep = Annotated[UserRead, Depends(require_admin)]
+</code></pre>
+<p>Сначала выполняется <code>get_current_user</code>, затем проверка роли. Обычный пользователь получает 403.</p>
+<p>Для защиты операции достаточно добавить параметр <code>_admin: AdminUserDep</code>.</p>
+    <hr>
+
+    <h2>Auth-роутер</h2>
+<p><b>Начало нового <code>app/routers/auth.py</code></b></p>
+<pre class="language-python" data-file="app/routers/auth.py" data-mode="replace"><code>from typing import Annotated
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import OAuth2PasswordRequestForm
+from app.core.config import SettingsDep
+from app.core.security import create_access_token
+from app.db.fake_users import UsersDep
+from app.dependencies.auth import CurrentUserDep, invalid_credentials
+from app.schemas.auth import Token, UserRead
+from app.services.auth import authenticate_user
+
+router = APIRouter(prefix="/auth", tags=["Auth"])
+LoginForm = Annotated[OAuth2PasswordRequestForm, Depends()]
+</code></pre>
+<p>Форма принимает поля <code>username</code> и <code>password</code>. Вход отправляем как form data, а не JSON.</p>
+    <hr>
+
+    <h2>Endpoint входа</h2>
+<p><b>Продолжение <code>app/routers/auth.py</code></b></p>
+<pre class="language-python" data-file="app/routers/auth.py" data-mode="append"><code>@router.post("/token", response_model=Token)
+def login(form: LoginForm, users: UsersDep, settings: SettingsDep) -&gt; Token:
+    user = authenticate_user(users, form.username, form.password)
+    if user is None:
+        raise invalid_credentials()
+    if user.disabled:
+        raise HTTPException(status_code=403, detail="Пользователь заблокирован")
+    return Token(access_token=create_access_token(user.username, settings))
+</code></pre>
+<p>Используем <code>def</code>, чтобы вычисление хэша выполнялось в пуле потоков. При успехе клиент получает <code>access_token</code> и <code>token_type="bearer"</code>.</p>
+    <hr>
+
+    <h2>Профиль и подключение роутера</h2>
+<p><b>Завершение <code>app/routers/auth.py</code></b></p>
+<pre class="language-python" data-file="app/routers/auth.py" data-mode="append"><code>@router.get("/me", response_model=UserRead)
+def read_current_user(user: CurrentUserDep) -&gt; UserRead:
+    return user
+</code></pre>
+<p>В <code>app/main.py</code> добавляем импорт:</p>
+<pre class="language-python" data-file="app/main.py" data-mode="append-import"><code>from app.routers import auth
+</code></pre>
+<p>Внутри <code>create_app()</code>, рядом с подключением роутера товаров:</p>
+<pre class="language-python" data-file="app/main.py" data-mode="insert-factory-statement"><code>app.include_router(auth.router)
+</code></pre>
+<p>Фабрику, настройки, <code>/health</code> и остальные маршруты сохраняем.</p>
+    <hr>
+
+    <h2>Защита POST и PUT</h2>
+<p>В <code>app/routers/product.py</code> добавляем импорт:</p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="append-import"><code>from app.dependencies.auth import AdminUserDep
+</code></pre>
+<p>Заменяем функции под прежними декораторами:</p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="replace-functions-preserve-decorators"><code>async def create_product(
+    product: ProductCreate, db: DbDep, _admin: AdminUserDep,
+) -&gt; ProductRead:
+    return create(product, db)
+
+
+async def replace_product(
+    product_id: ProductId, to_replace: ProductCreate,
+    db: DbDep, _admin: AdminUserDep,
+) -&gt; ProductRead:
+    return replace(product_id, to_replace, db)
+</code></pre>
+<p>Добавили только зависимость доступа. Существующие сервисы и <code>DbDep</code> продолжают работать.</p>
+    <hr>
+
+    <h2>Защита PATCH и DELETE</h2>
+<p><b>В том же <code>app/routers/product.py</code>, под прежними декораторами</b></p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="replace-functions-preserve-decorators"><code>async def update_product(
+    product_id: ProductId, to_update: ProductUpdate,
+    db: DbDep, _admin: AdminUserDep,
+) -&gt; ProductRead:
+    return update(product_id, to_update, db)
+
+
+async def delete_product(
+    product_id: ProductId, db: DbDep, _admin: AdminUserDep,
+) -&gt; None:
+    delete(product_id, db)
+</code></pre>
+<p>Чтение товаров остаётся публичным. Все четыре операции записи теперь требуют администратора.</p>
+    <hr>
+
+    <h2>Проверка в Swagger UI</h2>
+<pre class="language-bash"><code>uv run fastapi dev app/main.py
+</code></pre>
+<p>Открываем <code>http://127.0.0.1:8000/docs</code>. На проверку оставляем последние 15 минут занятия.</p>
+<table>
+  <thead><tr><th>Действие</th><th>Результат</th></tr></thead>
+  <tbody>
+    <tr><td>GET товаров без входа</td><td>200</td></tr>
+    <tr><td>GET <code>/auth/me</code> без токена</td><td>401</td></tr>
+    <tr><td>Вход с неправильным паролем</td><td>401</td></tr>
+    <tr><td>Authorize: <code>user</code> и пароль из <code>USER_PASSWORD</code>, затем профиль</td><td>200, хэша в ответе нет</td></tr>
+    <tr><td>Обычный пользователь создаёт товар</td><td>403</td></tr>
+    <tr><td>Logout, затем Authorize: <code>admin</code> и пароль из <code>ADMIN_PASSWORD</code></td><td>POST 201, PUT/PATCH 200, DELETE 204</td></tr>
+  </tbody>
+</table>
+<p>Данные товара: <code>{"name":"Gaming Mouse","category":"electronics","price":49.90}</code>. Запоминаем ID из POST и используем его в остальных операциях.</p>
+    <hr>
+
+    <h2>Готовые решения для аутентификации</h2>
+<table>
+  <thead><tr><th>Решение</th><th>Что предоставляет</th><th>Когда подходит</th></tr></thead>
+  <tbody>
+    <tr><td><a href="https://github.com/fastapi-users/fastapi-users">FastAPI Users</a></td><td>Библиотека с готовыми роутами регистрации, входа, сброса пароля и проверки email.</td><td>Управление пользователями внутри FastAPI-приложения.</td></tr>
+    <tr><td><a href="https://www.keycloak.org/">Keycloak</a></td><td>Отдельный сервер: общий вход в несколько приложений, роли и управление пользователями.</td><td>Нужен единый вход и собственное развёртывание системы аутентификации.</td></tr>
+    <tr><td><a href="https://auth0.com/docs/authenticate/login/auth0-universal-login">Auth0</a></td><td>Облачный сервис с готовой страницей входа, социальным входом и двухфакторной проверкой.</td><td>Удобнее использовать внешний сервис аутентификации.</td></tr>
+  </tbody>
+</table>
+<p>Библиотеку подключаем к своему API. Keycloak и Auth0 берут вход на себя, а наше API проверяет токены выбранного провайдера и права на операции.</p>
+<p>FastAPI Users находится в режиме сопровождения: обновления безопасности и зависимостей продолжаются, новые функции не добавляются. Учитываем это при выборе для нового проекта.</p>
+    <hr>
+
+    <h2>Результат занятия</h2>
+<ul>
+  <li>Есть два пользователя, вход и профиль.</li>
+  <li>Пароли проверяем по хэшам, JWT проверяем по подписи и сроку.</li>
+  <li>Зависимости дают 401 для неверных учётных данных и 403 при недостаточных правах.</li>
+  <li>Администратор выполняет CRUD, чтение доступно всем.</li>
+</ul>
+<p>На этом обязательная практика закончена. Автоматические тесты разберём на следующем занятии.</p>
+<p>Учебные словари сбрасываются при перезапуске. Вне локального занятия нужны HTTPS и другие пароли. Refresh token и отзыв токенов требуют отдельной реализации.</p>
+<p>Материалы: <a href="https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/">FastAPI</a>, <a href="https://pyjwt.readthedocs.io/en/stable/usage.html">PyJWT</a>, <a href="https://www.rfc-editor.org/rfc/rfc9700.html#section-2.4">RFC 9700</a>.</p>
+    <hr>
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>
