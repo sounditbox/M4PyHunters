@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated, Self
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator, \
+from pydantic import Field, ConfigDict, field_validator, \
     model_validator
+from sqlmodel import SQLModel
 
 ProductName = Annotated[
     str,
@@ -18,13 +19,13 @@ PositivePrice = Annotated[float, Field(gt=0, le=1_000_000)]
 Tag = Annotated[str, Field(min_length=2, max_length=30)]
 
 
-class ProductSpecs(BaseModel):
+class ProductSpecs(SQLModel):
     weight_grams: int = Field(gt=0)
     color: str | None = Field(default=None, max_length=30)
     tags: list[Tag] = Field(default_factory=list, max_length=10)
 
 
-class ProductBase(BaseModel):
+class ProductBase(SQLModel):
     name: ProductName
     category: CategoryName
     price: PositivePrice
@@ -68,7 +69,7 @@ class ProductRead(ProductBase):
     id: int = Field(ge=1)
 
 
-class ProductUpdate(BaseModel):
+class ProductUpdate(SQLModel):
     name: str | None = Field(default=None, min_length=3, max_length=80)
     category: str | None = Field(default=None, min_length=2, max_length=40)
     price: float | None = Field(default=None, gt=0)

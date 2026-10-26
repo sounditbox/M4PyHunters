@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from sqlmodel import select, col, Session
+
+from app.models.products import Product
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 
 
@@ -11,24 +14,38 @@ class ProductNotFoundError(ServiceError):
     pass
 
 
-def get_product_by_id(product_id: int, db: dict) -> ProductRead | None:
-    if product_id not in db:
+def get_product_by_id(product_id: int, db: Session) -> ProductRead | None:
+    product = db.get(Product, product_id)
+    if not product:
         raise ProductNotFoundError
-    return db[product_id]
+    return product
 
 
 def get_products(
-        search: str, limit: int, category: str, only_available: bool, db: dict
+        search: str, limit: int, category: str, only_available: bool,
+        db: Session
 ) -> list[ProductRead]:
-    products = list(db.values())
+    # products = list(db.values())
+    # if only_available:
+    #     products = [p for p in products if p["is_available"]]
+    # if category:
+    #     products = [p for p in products if p["category"] == category]
+    # if search:
+    #     products = [product for product in products if
+    #                 search.lower() in product["name"].lower()]
+    # return products[:limit]
+
+    statement = select(Product)
     if only_available:
-        products = [p for p in products if p["is_available"]]
+        statement = statement.where(col(Product.is_available).is_(True))
     if category:
-        products = [p for p in products if p["category"] == category]
+        statement = statement.where(Product.category == category)
     if search:
-        products = [product for product in products if
-                    search.lower() in product["name"].lower()]
-    return products[:limit]
+        statement = statement.where(
+            col(Product.name).icontains(search, autoescape=True)
+        )
+    statement = statement.limit(limit)
+    return db.exec(statement).all()
 
 
 def create(product: ProductCreate, db: dict) -> ProductRead:

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=30, gt=0)
     admin_password: SecretStr = Field(min_length=8)
     user_password: SecretStr = Field(min_length=8)
+    database_url: str = "sqlite+pysqlite:///./products.db"
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8",

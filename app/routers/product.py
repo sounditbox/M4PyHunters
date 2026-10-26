@@ -4,7 +4,7 @@ from fastapi import Path, Query, APIRouter
 from starlette import status
 
 from app.dependencies.auth import CurrentUserDep, AdminUserDep
-from app.dependencies.db import DbDep
+from app.dependencies.db import SessionDep, DbDep
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 from app.services.product import (
     get_product_by_id, get_products, create,
@@ -30,7 +30,7 @@ router = APIRouter(prefix='/products', tags=['Products'])
 
 @router.get("/{product_id}", response_model=ProductRead,
             description='Получение товара по ID')
-async def get_product(product_id: ProductId, db: DbDep,
+async def get_product(product_id: ProductId, db: SessionDep,
                       user: CurrentUserDep) -> ProductRead:
     return get_product_by_id(product_id, db)
 
@@ -38,7 +38,7 @@ async def get_product(product_id: ProductId, db: DbDep,
 @router.get("", response_model=list[ProductRead],
             description='Получение списка товаров')
 async def list_products(
-        db: DbDep,
+        db: SessionDep,
         user: CurrentUserDep,
         search: SearchParam = None,
         limit: LimitParam = 10,
