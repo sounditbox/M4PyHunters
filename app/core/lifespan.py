@@ -1,30 +1,32 @@
 import logging
 from contextlib import asynccontextmanager
-from copy import deepcopy
 
 from fastapi import FastAPI
-from sqlmodel import SQLModel
+from sqlmodel import SQLModel, Session
 
-from app.core.config import get_settings
 from app.core.logging_conf import configure_logging
+from app.db.bootstrap import seed_users
 from app.db.database import create_database_engine
-from app.db.fake_users import fake_users
 from app.models.products import Product  # type: ignore
-
+from app.models.user import User # type: ignore
 logger = logging.getLogger("lifespan")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = app.state.settings
     configure_logging()
     logger.info("App starting up...")
-    engine = create_database_engine(get_settings().database_url)
+    engine = create_database_engine(settings.database_url)
     logger.info("Database engine created")
     try:
         SQLModel.metadata.create_all(engine)
+        if settings.debug:
+            with Session(engine) as db:
+                seed_users(db, settings)
+
         logger.info("Database tables created")
         app.state.engine = engine
-        app.state.users = deepcopy(fake_users)
 
         yield
 

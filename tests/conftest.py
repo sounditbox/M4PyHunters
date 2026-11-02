@@ -22,7 +22,7 @@ def client():
 @pytest.fixture
 def admin_headers(client):
     response = client.post(
-        "/auth/token",
+        "/auth/obtain_token",
         data={"username": "admin", "password": "admin-pass"},
     )
     assert response.status_code == 200

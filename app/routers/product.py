@@ -4,7 +4,7 @@ from fastapi import Path, Query, APIRouter
 from starlette import status
 
 from app.dependencies.auth import CurrentUserDep, AdminUserDep
-from app.dependencies.db import SessionDep, DbDep
+from app.dependencies.db import SessionDep
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 from app.services.product import (
     get_product_by_id, get_products, create,
@@ -53,15 +53,15 @@ async def list_products(
 @router.post("", response_model=ProductRead,
              status_code=status.HTTP_201_CREATED,
              description='Создание нового товара')
-async def create_product(product: ProductCreate, db: DbDep,
+async def create_product(product: ProductCreate, db: SessionDep,
                          _admin: AdminUserDep) -> ProductRead:
-    return create(product, db)
+    return create(product, db, _admin.id)
 
 
 @router.put("/{product_id}", response_model=ProductRead,
             description='Замена товара')
 async def replace_product(product_id: ProductId,
-                          to_replace: ProductCreate, db: DbDep,
+                          to_replace: ProductCreate, db: SessionDep,
                           _admin: AdminUserDep) -> ProductRead:
     return replace(product_id, to_replace, db)
 
@@ -69,7 +69,7 @@ async def replace_product(product_id: ProductId,
 @router.patch('/{product_id}', response_model=ProductRead,
               description='Обновление товара')
 async def update_product(product_id: ProductId,
-                         to_update: ProductUpdate, db: DbDep,
+                         to_update: ProductUpdate, db: SessionDep,
                          _admin: AdminUserDep) -> ProductRead:
     return update(product_id, to_update, db)
 
@@ -77,6 +77,6 @@ async def update_product(product_id: ProductId,
 @router.delete('/{product_id}', status_code=status.HTTP_204_NO_CONTENT,
                description='Удаление товара'
                )
-async def delete_product(product_id: ProductId, db: DbDep,
+async def delete_product(product_id: ProductId, db: SessionDep,
                          _admin: AdminUserDep) -> None:
     delete(product_id, db)

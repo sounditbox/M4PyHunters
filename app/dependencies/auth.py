@@ -5,11 +5,12 @@ from fastapi.security import OAuth2PasswordBearer
 from jwt import InvalidTokenError
 
 from app.core.security import decode_access_token
-from app.dependencies.db import UsersDep
+from app.dependencies.db import SessionDep
 from app.dependencies.settings import SettingsDep
 from app.schemas.auth import UserRead
+from app.services.auth import get_user_by_username
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/obtain_token")
 TokenDep = Annotated[str, Depends(oauth2_scheme)]
 
 
@@ -21,13 +22,13 @@ def invalid_credentials() -> HTTPException:
 
 
 def get_current_user(
-        token: TokenDep, users: UsersDep, settings: SettingsDep,
+        token: TokenDep, db: SessionDep, settings: SettingsDep,
 ) -> UserRead:
     try:
         username = decode_access_token(token, settings)
     except (InvalidTokenError, ValueError, TypeError):
         raise invalid_credentials() from None
-    user = users.get(username)
+    user = get_user_by_username(db, username)
     if user is None:
         raise invalid_credentials()
     if user.disabled:

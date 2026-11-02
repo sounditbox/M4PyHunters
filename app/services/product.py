@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import ValidationError
 from sqlmodel import select, col, Session
 
 from app.models.products import Product
@@ -14,6 +15,12 @@ class ProductNotFoundError(ServiceError):
     pass
 
 
+class InvalidProductDataError(ServiceError):
+    def __init__(self, errors: list[dict]):
+        super().__init__("Invalid product data")
+        self.errors = errors
+
+
 def get_product_by_id(product_id: int, db: Session) -> ProductRead | None:
     product = db.get(Product, product_id)
     if not product:
@@ -25,16 +32,6 @@ def get_products(
         search: str, limit: int, category: str, only_available: bool,
         db: Session
 ) -> list[ProductRead]:
-    # products = list(db.values())
-    # if only_available:
-    #     products = [p for p in products if p["is_available"]]
-    # if category:
-    #     products = [p for p in products if p["category"] == category]
-    # if search:
-    #     products = [product for product in products if
-    #                 search.lower() in product["name"].lower()]
-    # return products[:limit]
-
     statement = select(Product)
     if only_available:
         statement = statement.where(col(Product.is_available).is_(True))
@@ -48,29 +45,40 @@ def get_products(
     return db.exec(statement).all()
 
 
-def create(product: ProductCreate, db: dict) -> ProductRead:
-    next_id = max(db.keys(), default=0) + 1
-    product_dict: dict = product.model_dump()
-    product_dict["id"] = next_id
-    db[next_id] = product_dict
-    return product_dict
+def create(product: ProductCreate, db: Session, created_by_id: int) -> Product:
+    saved = Product(**product.model_dump() | {"created_by_id": created_by_id})
+    db.add(saved)
+    db.commit()
+    db.refresh(saved)
+    return saved
 
 
 def replace(product_id: int, to_replace: ProductCreate,
-            db: dict) -> ProductRead:
+            db: Session) -> Product:
     product = get_product_by_id(product_id, db)
-    product.update(to_replace.model_dump())
+    product.sqlmodel_update(to_replace.model_dump())
+    db.commit()
+    db.refresh(product)
     return product
 
 
-def update(product_id: int, to_update: ProductUpdate, db: dict) -> ProductRead:
-    product: dict = get_product_by_id(product_id, db)
-    to_validate = product | to_update.model_dump(exclude_unset=True)
-    db[product_id] = ProductRead.model_validate(to_validate).model_dump()
-    return db[product_id]
+def update(product_id: int, to_update: ProductUpdate,
+           db: Session) -> Product:
+    product = get_product_by_id(product_id, db)
+    patch = to_update.model_dump(exclude_unset=True)
+    try:
+        validated = ProductCreate.model_validate(product, update=patch)
+    except ValidationError as exc:
+        raise InvalidProductDataError(
+            exc.errors(include_context=False)
+        ) from exc
+    product.sqlmodel_update(validated.model_dump())
+    db.commit()
+    db.refresh(product)
+    return product
 
 
-def delete(product_id: int, db: dict) -> ProductRead:
-    if product_id not in db:
-        raise ProductNotFoundError
-    db.pop(product_id)
+def delete(product_id: int, db: Session) -> None:
+    product = get_product_by_id(product_id, db)
+    db.delete(product)
+    db.commit()

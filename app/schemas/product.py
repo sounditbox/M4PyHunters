@@ -75,3 +75,5 @@ class ProductUpdate(SQLModel):
     price: float | None = Field(default=None, gt=0)
     description: str | None = None
     is_available: bool | None = None
+    sale_price: float | None = None
+    specs: ProductSpecs | None = None

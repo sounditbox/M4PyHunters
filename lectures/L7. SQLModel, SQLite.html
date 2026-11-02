@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <title>Лекция 7: SQLModel и SQLite в нашем Products API</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+    <h1>Лекция 7: SQLModel и SQLite</h1>
+    <p>После L6 у нас есть Products API с валидацией, JWT, ролями и тестами. Теперь перенесём товары и пользователей в базу. Данные должны переживать перезапуск приложения. Затем свяжем товар с пользователем, который его создал.</p>
+    <p>С помощью SQLModel объединим описание общих полей Pydantic и ORM. Разберём таблицу, Engine, Session и транзакцию, затем подключим их к нашим сервисам, зависимостям и тестам.</p>
+    <hr>
+
+    <h2>От чего отталкиваемся</h2>
+    <pre><code>app/
+├── main.py                # create_app(), /health, обработчик 404
+├── core/                  # config.py, lifespan.py, security.py
+├── db/                    # fake_db.py, fake_users.py
+├── dependencies/          # db.py, settings.py, auth.py
+├── routers/               # product.py, auth.py
+├── schemas/               # product.py, auth.py
+└── services/              # product.py, auth.py
+tests/                     # проверки из L6
+</code></pre>
+    <p>Сейчас <code>lifespan</code> копирует <code>fake_db</code> в <code>app.state.db</code>, а <code>DbDep</code> передаёт этот словарь сервису товаров. При новом запуске изменения пропадают.</p>
+    <p>Чтение товаров требует <code>CurrentUserDep</code>, запись — <code>AdminUserDep</code>. Пользователи пока хранятся в <code>app.state.users</code>. Во второй части лекции перенесём их в БД, сохранив вход на <code>/auth/token</code>.</p>
+    <hr>
+
+    <h2>План перехода</h2>
+    <pre><code>HTTP-запрос + JWT
+        ↓
+routers/product.py       проверка входа и прав
+        ↓
+services/product.py      получение и изменение товаров
+        ↓
+Session → Engine → SQLite-файл
+</code></pre>
+    <p>Создадим <code>app/models/product.py</code> для таблицы и <code>app/db/database.py</code> для подключения. В существующих сервисах заменим операции со словарём на SQLModel.</p>
+    <p>Далее блоки с именем файла собираются по порядку: «заменить файл» означает весь файл, «продолжение» — дописать в конец. Небольшие замены классов указаны отдельно. Сервер и тесты запускаем после сборки всех изменений.</p>
+    <hr>
+
+    <h2>Что даёт SQLModel</h2>
+    <p><b>SQLModel</b> построен на SQLAlchemy и Pydantic. Он позволяет описывать общие поля один раз, а затем использовать их в схеме API и в модели таблицы. Для запросов есть удобный <code>Session.exec()</code>.</p>
+    <table>
+      <thead><tr><th>Понятие</th><th>Роль</th></tr></thead>
+      <tbody>
+        <tr><td>SQLModel без table=True</td><td>Модель данных с проверками Pydantic; таблицу не создаёт.</td></tr>
+        <tr><td>SQLModel с table=True</td><td>Модель таблицы, с которой работает ORM SQLAlchemy.</td></tr>
+        <tr><td>ORM</td><td>Связывает строки таблицы с Python-объектами.</td></tr>
+        <tr><td>Engine</td><td>Знает адрес базы, драйвер и управляет соединениями.</td></tr>
+        <tr><td>Session</td><td>Выполняет запросы и отслеживает изменения объектов.</td></tr>
+        <tr><td>Драйвер</td><td>Передаёт SQL базе. Для SQLite это встроенный <code>sqlite3</code>.</td></tr>
+      </tbody>
+    </table>
+    <p>SQLModel сокращает часть кода, но не отменяет SQLAlchemy: соединения, SQL-выражения и транзакции работают на его основе. Выбираем библиотеку по удобству для проекта, а не по возрасту; автоматического ускорения от замены нет.</p>
+    <hr>
+
+    <h2>Установка и настройки</h2>
+    <pre class="language-bash"><code>uv add sqlmodel
+</code></pre>
+    <p>SQLAlchemy и Pydantic установятся как зависимости. Отдельный сервер и дополнительный драйвер для SQLite не нужны.</p>
+    <p>Лекцию собираем от состояния после L6. Если уже выполняли предыдущий вариант L7, сначала уберите добавленную там прямую зависимость командой <code>uv remove sqlalchemy</code>, затем установите SQLModel. В итоговом варианте отдельный <code>app/models/base.py</code> не используется.</p>
+    <p><b>В <code>app/core/config.py</code> добавляем одно поле внутрь существующего <code>Settings</code>:</b></p>
+    <pre class="language-python" data-file="app/core/config.py" data-mode="class-field" data-symbol="Settings"><code>    database_url: str = "sqlite+pysqlite:///./products.db"
+</code></pre>
+    <p>Остальные настройки, ограничения паролей и ключа, <code>model_config</code> и <code>get_settings()</code> сохраняем.</p>
+    <p><b>В <code>.env</code> и <code>.env.example</code> добавляем:</b></p>
+    <pre class="language-properties"><code>DATABASE_URL=sqlite+pysqlite:///./products.db
+</code></pre>
+    <p>Это относительный путь: запускаем команды из корня проекта. Файл <code>products.db</code> появится при создании таблиц. В <code>.gitignore</code> добавляем <code>*.db</code> и <code>*.db-*</code>.</p>
+    <hr>
+
+    <h2>Схемы данных</h2>
+    <p>В <code>app/schemas/product.py</code> импортируем <code>SQLModel</code> из <code>sqlmodel</code> и заменяем родителя <code>BaseModel</code> на <code>SQLModel</code>; <code>ProductCreate</code> и <code>ProductRead</code> продолжают наследоваться от <code>ProductBase</code>, поля, настройки и валидаторы сохраняем.</p>
+    <p>Поле <code>specs: ProductSpecs | None = None</code> переносим из <code>ProductBase</code> в оба класса <code>ProductCreate</code> и <code>ProductRead</code>: в API это вложенная модель, а в таблице ниже будет JSON-словарь.</p>
+    <p>Все схемы здесь без <code>table=True</code>. <code>Field</code> оставляем из Pydantic. В SQLModel уже включено <code>from_attributes=True</code>: схема читает поля прямо из ORM-объекта, поэтому для ответа достаточно <code>response_model=ProductRead</code>, без ручной сборки словаря.</p>
+    <hr>
+
+    <h2>Модель таблицы товара</h2>
+    <p>Создаём пакет <code>app/models/</code> с пустым <code>__init__.py</code>.</p>
+    <p><b>Новый <code>app/models/product.py</code> целиком:</b></p>
+    <pre class="language-python" data-file="app/models/product.py" data-mode="replace"><code>from sqlalchemy import Column, JSON
+from sqlmodel import Field
+
+from app.schemas.product import CategoryName, ProductBase
+
+
+class Product(ProductBase, table=True):
+    __tablename__ = "products"
+
+    id: int | None = Field(default=None, primary_key=True)
+    category: CategoryName = Field(index=True)
+    specs: dict | None = Field(
+        default=None, sa_column=Column(JSON(none_as_null=True), nullable=True),
+    )
+</code></pre>
+    <p><code>table=True</code> превращает модель в описание таблицы. <code>SQLModel.metadata</code> собирает такие таблицы; собственный <code>DeclarativeBase</code> не нужен.</p>
+    <p>Здесь <code>Field</code> импортирован из SQLModel: он умеет задавать первичный ключ, индекс и <code>sa_column</code>. Для JSON используем тип SQLAlchemy — это обычный способ уточнить настройки SQLModel.</p>
+    <hr>
+
+    <h2>Параметры Field для таблиц</h2>
+    <p>В классе с <code>table=True</code> у <code>Field</code> из SQLModel есть дополнительные аргументы, которые настраивают столбец в базе:</p>
+    <table>
+      <thead><tr><th>Аргумент</th><th>Что задаёт в БД</th></tr></thead>
+      <tbody>
+        <tr><td><code>primary_key=True</code></td><td>Первичный ключ: идентификатор строки, как наш <code>id</code>.</td></tr>
+        <tr><td><code>index=True</code></td><td>Индекс для поиска и фильтрации, как у <code>category</code>. Ускоряет подходящие запросы, но занимает место и усложняет запись.</td></tr>
+        <tr><td><code>unique=True</code></td><td>Запрещает повторяющиеся значения, например одинаковые логины.</td></tr>
+        <tr><td><code>nullable=False</code></td><td>Запрещает SQL NULL в столбце независимо от того, как данные попали в БД.</td></tr>
+        <tr><td><code>foreign_key="users.id"</code></td><td>Внешний ключ на другую таблицу. Ниже свяжем товар с пользователем через такой ключ.</td></tr>
+        <tr><td><code>sa_type=...</code></td><td>Явный SQL-тип, если автоматический вывод из Python-типа не подходит.</td></tr>
+        <tr><td><code>sa_column=Column(...)</code></td><td>Готовое описание столбца SQLAlchemy, как у нашего JSON-поля <code>specs</code>.</td></tr>
+        <tr><td><code>sa_column_kwargs={...}</code></td><td>Дополнительные аргументы для Column, например <code>{"server_default": "0"}</code> — default на стороне БД, который работает и при записи другими клиентами.</td></tr>
+      </tbody>
+    </table>
+    <p>Если передаём готовый <code>sa_column=Column(...)</code>, его <code>nullable</code>, <code>index</code> и другие настройки задаём внутри <code>Column</code>, а не повторяем в <code>Field</code>.</p>
+    <hr>
+
+    <h2>Типы и ограничения: что важно для нашего API</h2>
+    <p><code>price</code> и <code>sale_price</code> у нас имеют тип <code>float</code>, SQLModel создаёт соответствующие столбцы. Сохраняем текущие схемы и числовой JSON. Для точных денежных расчётов обычно выбирают целые минимальные единицы или <code>Decimal</code> и <code>Numeric</code>; такой переход потребует согласованно изменить схемы и тесты.</p>
+    <p><code>specs</code> сохраняем как JSON: <code>model_dump(mode="json")</code> превратит <code>ProductSpecs</code> во вложенный словарь. <code>none_as_null=True</code> сохраняет Python <code>None</code> как SQL NULL.</p>
+    <p>Проверки <code>min_length</code>, <code>gt</code> и наших валидаторов работают при валидации данных. Они не превращаются автоматически в CHECK-ограничения базы. SQLite также не ограничивает длину строки только по размеру VARCHAR.</p>
+    <hr>
+
+    <h2>Engine: подключение к базе</h2>
+    <p><b>Новый <code>app/db/database.py</code> целиком:</b></p>
+    <pre class="language-python" data-file="app/db/database.py" data-mode="replace"><code>from sqlalchemy import Engine
+from sqlmodel import create_engine
+
+
+def create_database_engine(database_url: str) -&gt; Engine:
+    options = {}
+    if database_url.startswith("sqlite"):
+        options["connect_args"] = {"check_same_thread": False}
+    return create_engine(database_url, **options)
+</code></pre>
+    <p><code>Engine</code> создаём один раз на запуск приложения. Это Engine SQLAlchemy, поэтому его тип импортирован оттуда. Сессии будем создавать через <code>sqlmodel.Session(engine)</code> прямо в зависимости.</p>
+    <p><code>check_same_thread=False</code> разрешает SQLite-соединению использоваться последовательно из разных потоков FastAPI. Это не разрешение выполнять параллельные операции с одной Session.</p>
+    <hr>
+
+    <h2>Подключаем базу в lifespan</h2>
+    <p><b>Заменяем <code>app/core/lifespan.py</code> целиком:</b></p>
+    <pre class="language-python" data-file="app/core/lifespan.py" data-mode="replace"><code>import logging
+from contextlib import asynccontextmanager
+from copy import deepcopy
+
+from fastapi import FastAPI
+from sqlmodel import SQLModel
+
+from app.core.logging_conf import configure_logging
+from app.db.database import create_database_engine
+from app.db.fake_users import fake_users
+from app.models.product import Product  # регистрирует таблицу в metadata
+
+logger = logging.getLogger("lifespan")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    configure_logging()
+    logger.info("App starting up...")
+    engine = create_database_engine(app.state.settings.database_url)
+    try:
+        SQLModel.metadata.create_all(engine)
+        app.state.engine = engine
+        app.state.users = deepcopy(fake_users)
+        yield
+    finally:
+        engine.dispose()
+        logger.info("App shutting down...")
+</code></pre>
+    <p><code>app.state.settings</code> зададим в <code>create_app()</code> ниже. Импорт <code>Product</code> нужен до <code>create_all()</code>, даже если имя не используется в теле функции.</p>
+    <p><code>app.state.db</code> больше не создаём. <code>dispose()</code> освобождает соединения при завершении. Пользователей, логирование и обработку JWT сохраняем.</p>
+    <hr>
+
+    <h2>Таблица и начальные данные — разные вещи</h2>
+    <p><code>create_all()</code> создаёт отсутствующие таблицы. Повторный запуск не очищает товары и не заполняет таблицу заново.</p>
+    <p>Первый запуск с новым <code>products.db</code> даст пустой список и <code>products_count: 0</code>. Товары создадим через API. Пять записей из <code>fake_db</code> будем добавлять явно в тестах.</p>
+    <p><code>create_all()</code> не добавит новый столбец в уже существующую таблицу и не хранит историю изменений схемы. Для этого в L8 подключим Alembic.</p>
+    <p>В <code>app/db/fake_db.py</code> сохраняем словарь для тестов, а старую функцию <code>get_db()</code> и импорт <code>Request</code> удаляем.</p>
+    <hr>
+
+    <h2>Одна Session на запрос</h2>
+    <p><b>Заменяем <code>app/dependencies/db.py</code> целиком:</b></p>
+    <pre class="language-python" data-file="app/dependencies/db.py" data-mode="replace"><code>from collections.abc import Iterator
+from typing import Annotated
+
+from fastapi import Depends, Request
+from sqlmodel import Session
+
+from app.db.fake_users import get_users
+from app.schemas.auth import UserInDB
+
+UsersDep = Annotated[dict[str, UserInDB], Depends(get_users)]
+
+
+def get_session(request: Request) -&gt; Iterator[Session]:
+    with Session(request.app.state.engine) as session:
+        try:
+            yield session
+        except Exception:
+            session.rollback()
+            raise
+
+
+SessionDep = Annotated[Session, Depends(get_session)]
+</code></pre>
+    <p>До <code>yield</code> создаём сессию, после выполнения запроса выходим из <code>with</code> и закрываем её. При ошибке откатываем текущую транзакцию и передаём исключение дальше.</p>
+    <p>Импортируем именно <code>Session</code> из SQLModel: у неё есть метод <code>exec()</code>. Commit по умолчанию помечает поля для перечитывания; перед ответом явно вызываем <code>refresh()</code>, пока сессия открыта.</p>
+    <p><code>UsersDep</code> остаётся нужен авторизации. Глобальную Session не создаём. Закрытие сессии само по себе не фиксирует изменения.</p>
+    <hr>
+
+    <h2>Как устроен запрос на чтение</h2>
+    <pre class="language-python"><code>from sqlmodel import select
+
+statement = (
+    select(Product)
+    .where(Product.price &lt; 100)
+    .order_by(Product.id)
+    .limit(10)
+)
+products = session.exec(statement).all()
+</code></pre>
+    <p><code>select()</code> строит описание запроса. <code>where()</code>, <code>order_by()</code> и <code>limit()</code> возвращают новую версию этого описания. Запрос выполняется при обращении к Session.</p>
+    <p>SQLAlchemy переводит выражение в SQL нужной базы, драйвер передаёт SQL и параметры, а ORM собирает объекты <code>Product</code> из результата.</p>
+    <p>Атрибуты класса перегружают операторы: <code>Product.price &lt; 100</code> строит SQL-условие. Для нескольких условий используем несколько <code>where()</code>, <code>and_()</code> или <code>or_()</code>, а не Python <code>and</code>/<code>or</code>.</p>
+    <hr>
+
+    <h2>Как получить результат</h2>
+    <table>
+      <thead><tr><th>Вызов</th><th>Результат</th></tr></thead>
+      <tbody>
+        <tr><td><code>session.get(Product, 1)</code></td><td>Объект по первичному ключу либо None.</td></tr>
+        <tr><td><code>session.exec(select(Product)).all()</code></td><td>Список объектов Product.</td></tr>
+        <tr><td><code>session.exec(select(Product.name, Product.price)).all()</code></td><td>Строки с несколькими выбранными значениями.</td></tr>
+        <tr><td><code>session.exec(select(func.count()).select_from(Product)).one()</code></td><td>Одно число — количество товаров.</td></tr>
+      </tbody>
+    </table>
+    <p><code>select</code> импортируем из <code>sqlmodel</code>. Для одной выбранной сущности <code>exec()</code> уже возвращает результат без обёртки строки — дополнительный <code>scalars()</code> не нужен. Для нескольких столбцов получаем строки.</p>
+    <p><code>first()</code> возвращает первый результат или None; <code>one()</code> требует ровно один, <code>one_or_none()</code> — не больше одного. У COUNT без группировки одна строка даже для пустой таблицы: её значение 0.</p>
+    <p>Внутри Session один товар с одним ID представлен одним ORM-объектом — это <em>identity map</em>. <code>get()</code> может использовать уже загруженный объект, но Session не является общим кэшем всех запросов.</p>
+    <hr>
+
+    <h2>Чтение одного товара и списка</h2>
+    <p>В <code>app/services/product.py</code> добавляем импорты <code>from sqlmodel import Session, col, select</code> и <code>from app.models.product import Product</code>. Классы <code>ServiceError</code> и <code>ProductNotFoundError</code> сохраняем; далее заменяем одноимённые функции.</p>
+    <pre class="language-python" data-file="app/services/product.py" data-mode="replace-definitions"><code>def get_product_by_id(product_id: int, db: Session) -&gt; Product:
+    product = db.get(Product, product_id)
+    if product is None:
+        raise ProductNotFoundError
+    return product
+
+
+def get_products(
+    search: str | None, limit: int, category: str | None,
+    only_available: bool, db: Session,
+) -&gt; list[Product]:
+    statement = select(Product)
+    if only_available:
+        statement = statement.where(col(Product.is_available).is_(True))
+    if category:
+        statement = statement.where(Product.category == category)
+    if search:
+        statement = statement.where(
+            col(Product.name).icontains(search, autoescape=True)
+        )
+    statement = statement.order_by(Product.id).limit(limit)
+    return list(db.exec(statement).all())
+</code></pre>
+    <p>Сохраняем параметры и их порядок, включая <code>only_available=True</code> в роутере. <code>order_by(Product.id)</code> обеспечивает определённый порядок, важный и для лимита, и для тестов.</p>
+    <p><code>col()</code> из SQLModel помогает редактору понять, что здесь используется SQL-столбец с методами <code>is_()</code> и <code>icontains()</code>, а не обычный Python bool или str.</p>
+    <p><code>icontains()</code> ищет подстроку без учёта регистра, <code>autoescape=True</code> делает символы <code>%</code> и <code>_</code> обычными символами поиска. В стандартной SQLite преобразование регистра ограничено ASCII: поиск кириллицы с разным регистром потребует отдельного решения.</p>
+    <hr>
+
+    <h2>Значения передаём параметрами</h2>
+    <pre class="language-python"><code>statement = select(Product).where(Product.category == category)
+</code></pre>
+    <p>Значение <code>category</code> отправляется отдельно от SQL-кода. Не склеиваем SQL с пользовательским вводом через f-строки.</p>
+    <p>Когда нужен ручной SQL, используем <code>text()</code> и параметры:</p>
+    <pre class="language-python"><code>from sqlalchemy import text
+
+rows = session.execute(
+    text("SELECT name, price FROM products WHERE category = :category"),
+    {"category": category},
+).all()
+</code></pre>
+    <p>В нашем CRUD достаточно ORM. Для сложных запросов также существуют <code>join()</code>, <code>offset()</code>, <code>func.sum()</code> и выражения <code>insert()</code>, <code>update()</code>, <code>delete()</code>.</p>
+    <hr>
+
+    <h2>Создание товара и сохранение</h2>
+    <p>В <code>app/services/product.py</code> добавляем <code>product_values()</code> и заменяем <code>create()</code>:</p>
+    <pre class="language-python" data-file="app/services/product.py" data-mode="replace-definitions"><code>def product_values(data: ProductCreate) -&gt; dict:
+    return data.model_dump(
+        mode="json", include=set(ProductCreate.model_fields),
+    )
+
+
+def create(product: ProductCreate, db: Session) -&gt; Product:
+    saved = Product.model_validate(product_values(product))
+    db.add(saved)
+    db.commit()
+    db.refresh(saved)
+    return saved
+</code></pre>
+    <p><code>add()</code> добавляет объект в сессию, <code>commit()</code> фиксирует изменения, <code>refresh()</code> перечитывает запись. ID назначает SQLite.</p>
+    <p>У <code>ProductCreate</code> разрешены extra-поля. Через <code>include</code> берём только объявленные поля: присланный клиентом <code>id</code> не попадёт в таблицу. <code>mode="json"</code> превращает вложенные <code>specs</code> в словарь.</p>
+    <p>Сессия из нашей зависимости откатит незафиксированные изменения при исключении. Уже выполненный <code>commit()</code> откатить нельзя.</p>
+    <hr>
+
+    <h2>Полная замена и удаление</h2>
+    <p>В <code>app/services/product.py</code> заменяем две функции:</p>
+    <pre class="language-python" data-file="app/services/product.py" data-mode="replace-definitions"><code>def replace(product_id: int, to_replace: ProductCreate,
+            db: Session) -&gt; Product:
+    product = get_product_by_id(product_id, db)
+    product.sqlmodel_update(product_values(to_replace))
+    db.commit()
+    db.refresh(product)
+    return product
+
+
+def delete(product_id: int, db: Session) -&gt; None:
+    product = get_product_by_id(product_id, db)
+    db.delete(product)
+    db.commit()
+</code></pre>
+    <p><code>sqlmodel_update()</code> переносит проверенные значения в существующий ORM-объект. Session замечает изменения и сохраняет их при <code>commit()</code>. ID товара остаётся прежним.</p>
+    <p>PUT заменяет все поля: пропущенные необязательные получают значения по умолчанию. <code>specs</code> присваиваем новым словарём целиком. DELETE сохраняет прежний контракт: 204 с пустым телом, отсутствующий товар даёт 404.</p>
+    <hr>
+
+    <h2>Частичное обновление: PATCH</h2>
+    <p>В <code>app/services/product.py</code> добавляем <code>from pydantic import ValidationError</code>, класс ошибки и новую функцию:</p>
+    <pre class="language-python" data-file="app/services/product.py" data-mode="replace-definitions"><code>class InvalidProductDataError(ServiceError):
+    def __init__(self, errors: list[dict]):
+        super().__init__("Invalid product data")
+        self.errors = errors
+
+
+def update(product_id: int, to_update: ProductUpdate,
+           db: Session) -&gt; Product:
+    product = get_product_by_id(product_id, db)
+    patch = to_update.model_dump(exclude_unset=True)
+    try:
+        validated = ProductCreate.model_validate(product, update=patch)
+    except ValidationError as exc:
+        raise InvalidProductDataError(
+            exc.errors(include_context=False)
+        ) from exc
+    product.sqlmodel_update(product_values(validated))
+    db.commit()
+    db.refresh(product)
+    return product
+</code></pre>
+    <p><code>exclude_unset=True</code> берёт только присланные поля. <code>model_validate(..., update=patch)</code> проверяет итоговое состояние до изменения товара. SQLModel умеет читать атрибуты ORM-объекта.</p>
+    <p>Пример: у товара цена 100 и скидочная цена 80. PATCH с ценой 70 должен дать 422 и сохранить прежние значения. Явный <code>description=null</code> очищает описание, <code>price=null</code> отклоняется.</p>
+    <p>Сохраняем текущие пять полей <code>ProductUpdate</code>. <code>specs</code> и <code>sale_price</code> пока задаём через POST/PUT.</p>
+    <hr>
+
+    <h2>Подключение CRUD к API</h2>
+    <p>В <code>app/routers/product.py</code> у всех шести эндпоинтов заменяем <code>DbDep</code> на <code>SessionDep</code>, а <code>async def</code> на <code>def</code>. Пути, параметры, <code>response_model</code> и зависимости прав оставляем прежними. Например:</p>
+    <pre class="language-python" data-file="app/routers/product.py" data-mode="edit"><code>@router.post("", response_model=ProductRead, status_code=201)
+def create_product(product: ProductCreate, db: SessionDep,
+                   _admin: AdminUserDep):
+    return create(product, db)
+</code></pre>
+    <p>Синхронную Session используем в обычных <code>def</code>: FastAPI выполнит обработчик в пуле потоков. Прямой вызов синхронной БД из <code>async def</code> блокирует цикл событий.</p>
+    <p>В <code>app/main.py</code> импортируем <code>InvalidProductDataError</code> из <code>app.services.product</code>, а <code>jsonable_encoder</code> из <code>fastapi.encoders</code>. Внутри <code>create_app()</code>, рядом с прежним обработчиком 404, добавляем:</p>
+    <pre class="language-python" data-file="app/main.py" data-mode="edit"><code>    @app.exception_handler(InvalidProductDataError)
+    async def invalid_product_data(request, exc):
+        errors = [dict(e, loc=["body", *e["loc"]]) for e in exc.errors]
+        return JSONResponse(
+            status_code=422,
+            content={"detail": jsonable_encoder(errors)},
+        )
+</code></pre>
+    <p>FastAPI сам обрабатывает ошибки входной схемы. Здесь превращаем ошибку ручной проверки PATCH в такой же HTTP 422.</p>
+    <hr>
+
+    <h2>Настройки приложения и /health</h2>
+    <p>В <code>app/dependencies/settings.py</code> зависимость читает настройки текущего приложения:</p>
+    <pre class="language-python" data-file="app/dependencies/settings.py" data-mode="replace"><code>from typing import Annotated
+from fastapi import Depends, Request
+from app.core.config import Settings
+
+
+def get_app_settings(request: Request) -&gt; Settings:
+    return request.app.state.settings
+
+
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
+</code></pre>
+    <p>В <code>app/main.py</code> добавляем <code>Settings</code> к импорту из <code>app.core.config</code>, импортируем <code>SessionDep</code> из <code>app.dependencies.db</code>, <code>Product</code> из <code>app.models.product</code> и <code>func, select</code> из SQLModel. В фабрике меняем сигнатуру и настройки, затем заменяем <code>health()</code>:</p>
+    <pre class="language-python" data-file="app/main.py" data-mode="fragment"><code>def create_app(settings: Settings | None = None) -&gt; FastAPI:
+    settings = settings if settings is not None else get_settings()
+    # Существующий app = FastAPI(..., lifespan=lifespan, ...) сохраняем.
+    # Сразу после него, до include_router(), добавляем:
+    app.state.settings = settings
+
+    @app.get("/health")
+    def health(db: SessionDep):
+        count = db.exec(select(func.count()).select_from(Product)).one()
+        return {"status": "ok", "products_count": count}
+</code></pre>
+    <p>Это фрагмент фабрики: подключение роутеров, оба обработчика ошибок, <code>return app</code> и <code>app = create_app()</code> сохраняем. Lifespan и JWT используют один объект настроек. Тесты смогут передать адрес отдельной БД.</p>
+    <hr>
+
+    <h2>Пользователь как таблица</h2>
+    <p>Новый <code>app/models/user.py</code> целиком:</p>
+    <pre class="language-python" data-file="app/models/user.py" data-mode="replace"><code>from sqlmodel import Field, SQLModel
+
+
+class User(SQLModel, table=True):
+    __tablename__ = "users"
+
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(index=True, unique=True, max_length=50)
+    hashed_password: str
+    role: str = "user"
+    disabled: bool = False
+</code></pre>
+    <p>В <code>app/schemas/auth.py</code> добавляем импорты <code>Field, SecretStr</code> из Pydantic и схему создания. Прежние <code>UserRead</code> и <code>Token</code> сохраняем:</p>
+    <pre class="language-python" data-file="app/schemas/auth.py" data-mode="append"><code>class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=50,
+                          pattern=r"^[A-Za-z0-9_-]+$")
+    password: SecretStr = Field(min_length=8)
+</code></pre>
+    <p><code>unique=True</code> запрещает одинаковые логины на уровне БД. В таблице храним хэш, в <code>UserRead</code> его нет. <code>SecretStr</code> скрывает пароль при обычном выводе модели, но хэш вычисляем отдельно.</p>
+    <p>В схеме создания нет поля <code>role</code>: через API новый пользователь получает обычную роль.</p>
+    <hr>
+
+    <h2>Добавление пользователя в БД</h2>
+    <p>Заменяем <code>app/services/auth.py</code> целиком. Общая функция создания пригодится и начальному заполнению, и API:</p>
+    <pre class="language-python" data-file="app/services/auth.py" data-mode="replace"><code>from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
+from app.core.security import DUMMY_HASH, hash_password, verify_password
+from app.models.user import User
+
+
+class UsernameTakenError(ValueError):
+    pass
+
+
+def get_user_by_username(db: Session, username: str) -&gt; User | None:
+    return db.exec(select(User).where(User.username == username)).first()
+
+
+def create_user(db: Session, username: str, password: str,
+                role: str = "user") -&gt; User:
+    user = User(username=username, hashed_password=hash_password(password),
+                role=role)
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise UsernameTakenError(username) from exc
+    db.refresh(user)
+    return user
+
+
+def authenticate_user(db: Session, username: str, password: str) -&gt; User | None:
+    user = get_user_by_username(db, username)
+    valid = verify_password(password, user.hashed_password if user else DUMMY_HASH)
+    return user if user is not None and valid else None
+</code></pre>
+    <p>Повторный логин нарушает уникальность <code>username</code>. Сначала откатываем неудачную транзакцию, затем передаём понятную ошибку роутеру. При неизвестном логине сохраняем проверку фиктивного хэша из L5.</p>
+    <hr>
+
+    <h2>Начальные пользователи при запуске</h2>
+    <p>Новый <code>app/db/bootstrap.py</code> целиком:</p>
+    <pre class="language-python" data-file="app/db/bootstrap.py" data-mode="replace"><code>from sqlmodel import Session
+from app.core.config import Settings
+from app.services.auth import create_user, get_user_by_username
+
+
+def seed_users(db: Session, settings: Settings) -&gt; None:
+    for username, password, role in (
+        ("admin", settings.admin_password, "admin"),
+        ("user", settings.user_password, "user"),
+    ):
+        if get_user_by_username(db, username) is None:
+            create_user(db, username, password.get_secret_value(), role)
+</code></pre>
+    <p>В <code>app/core/lifespan.py</code> добавляем <code>Session</code> к импорту SQLModel, импортируем <code>User</code> из <code>app.models.user</code> и <code>seed_users</code> из <code>app.db.bootstrap</code>. Удаляем <code>deepcopy</code>, импорт <code>fake_users</code> и присваивание <code>app.state.users</code>. Блок внутри <code>try</code> теперь такой:</p>
+    <pre class="language-python" data-file="app/core/lifespan.py" data-mode="replace-block"><code>        SQLModel.metadata.create_all(engine)
+        app.state.engine = engine
+        with Session(engine) as db:
+            seed_users(db, app.state.settings)
+        yield
+</code></pre>
+    <p>Обе табличные модели нужно импортировать до <code>create_all()</code>. При первом запуске добавляем admin и user с паролями из настроек. При повторном запуске сохраняем существующие записи и хэши. Смена пароля в <code>.env</code> не изменяет пароль уже созданного пользователя.</p>
+    <hr>
+
+    <h2>Авторизация читает пользователей из БД</h2>
+    <p>В <code>app/dependencies/db.py</code> удаляем <code>UsersDep</code> и импорты <code>get_users, UserInDB</code>. <code>get_session()</code> и <code>SessionDep</code> сохраняем. <code>fake_users.py</code> больше не нужен рабочему коду.</p>
+    <p>В <code>app/dependencies/auth.py</code> заменяем импорт <code>UsersDep</code> на <code>SessionDep</code>, добавляем <code>get_user_by_username</code> из сервиса и заменяем функцию:</p>
+    <pre class="language-python" data-file="app/dependencies/auth.py" data-mode="replace-definitions"><code>def get_current_user(token: TokenDep, db: SessionDep,
+                     settings: SettingsDep) -&gt; UserRead:
+    try:
+        username = decode_access_token(token, settings)
+    except (InvalidTokenError, ValueError, TypeError):
+        raise invalid_credentials() from None
+    user = get_user_by_username(db, username)
+    if user is None:
+        raise invalid_credentials()
+    if user.disabled:
+        raise HTTPException(status_code=403, detail="Пользователь заблокирован")
+    return UserRead.model_validate(user, from_attributes=True)
+</code></pre>
+    <p>В <code>app/routers/auth.py</code> также импортируем <code>SessionDep</code> вместо <code>UsersDep</code> и заменяем <code>login()</code>:</p>
+    <pre class="language-python" data-file="app/routers/auth.py" data-mode="replace-definitions"><code>@router.post("/token", response_model=Token)
+def login(form: LoginForm, db: SessionDep, settings: SettingsDep) -&gt; Token:
+    user = authenticate_user(db, form.username, form.password)
+    if user is None:
+        raise invalid_credentials()
+    if user.disabled:
+        raise HTTPException(status_code=403, detail="Пользователь заблокирован")
+    return Token(access_token=create_access_token(user.username, settings))
+</code></pre>
+    <p>JWT по-прежнему содержит логин. Роль и блокировку проверяем по актуальной записи БД. <code>CurrentUserDep</code>, <code>AdminUserDep</code> и <code>/auth/me</code> сохраняем.</p>
+    <hr>
+
+    <h2>API создания пользователей</h2>
+    <p>Новый <code>app/routers/user.py</code> целиком:</p>
+    <pre class="language-python" data-file="app/routers/user.py" data-mode="replace"><code>from fastapi import APIRouter, HTTPException
+from app.dependencies.auth import AdminUserDep
+from app.dependencies.db import SessionDep
+from app.schemas.auth import UserCreate, UserRead
+from app.services.auth import create_user, UsernameTakenError
+
+router = APIRouter(prefix="/users", tags=["Users"])
+
+
+@router.post("", response_model=UserRead, status_code=201)
+def add_user(data: UserCreate, db: SessionDep, _admin: AdminUserDep):
+    try:
+        user = create_user(db, data.username, data.password.get_secret_value())
+    except UsernameTakenError:
+        raise HTTPException(status_code=409, detail="Логин уже занят") from None
+    return UserRead.model_validate(user, from_attributes=True)
+</code></pre>
+    <p>В <code>app/main.py</code> добавляем <code>user</code> к импорту роутеров и <code>app.include_router(user.router)</code> внутри фабрики.</p>
+    <p>В Swagger под токеном admin отправляем POST <code>/users</code> с телом <code>{"username": "alice", "password": "alice-pass"}</code>. Получаем 201, затем входим как alice через прежний <code>/auth/token</code>. Повторное создание alice даёт 409, обычному пользователю создание недоступно.</p>
+    <hr>
+
+    <h2>Связи между моделями</h2>
+    <table>
+      <thead><tr><th>Связь</th><th>Пример</th><th>Как хранить</th></tr></thead>
+      <tbody>
+        <tr><td>Один ко многим, 1:N</td><td>Один пользователь создал много товаров. У товара один автор.</td><td><code>products.created_by_id</code> ссылается на <code>users.id</code>.</td></tr>
+        <tr><td>Один к одному, 1:1</td><td>Один пользователь имеет один профиль.</td><td>Внешний ключ <code>profiles.user_id</code> с ограничением <code>unique=True</code>.</td></tr>
+        <tr><td>Многие ко многим, N:M</td><td>Товар имеет много тегов, тег относится к разным товарам.</td><td>Промежуточная таблица <code>product_tags</code> с двумя внешними ключами.</td></tr>
+      </tbody>
+    </table>
+    <p>Реализуем 1:N. В строках товаров храним ID автора. Несколько товаров могут ссылаться на одного пользователя:</p>
+    <table>
+      <thead><tr><th>products.id</th><th>name</th><th>created_by_id</th></tr></thead>
+      <tbody><tr><td>1</td><td>Keyboard</td><td>1</td></tr><tr><td>2</td><td>Mouse</td><td>1</td></tr></tbody>
+    </table>
+    <p><b>Внешний ключ</b> связывает строки в БД. <b>Relationship</b> позволяет получать связанные Python-объекты: <code>product.created_by</code> и <code>user.products</code>.</p>
+    <hr>
+
+    <h2>Внешний ключ и Relationship</h2>
+    <p>В <code>app/models/product.py</code> добавляем импорты и поля внутрь существующего <code>Product</code>:</p>
+    <pre class="language-python" data-file="app/models/product.py" data-mode="class-fields-and-imports"><code>from typing import TYPE_CHECKING, Optional
+from sqlmodel import Relationship
+
+if TYPE_CHECKING:
+    from app.models.user import User
+
+# Внутри class Product(...):
+    created_by_id: int | None = Field(default=None, foreign_key="users.id")
+    created_by: Optional["User"] = Relationship(back_populates="products")
+</code></pre>
+    <p>В <code>app/models/user.py</code> добавляем вторую сторону:</p>
+    <pre class="language-python" data-file="app/models/user.py" data-mode="class-fields-and-imports"><code>from typing import TYPE_CHECKING
+from sqlmodel import Relationship
+
+if TYPE_CHECKING:
+    from app.models.product import Product
+
+# Внутри class User(...):
+    products: list["Product"] = Relationship(back_populates="created_by")
+</code></pre>
+    <p><code>back_populates</code> указывает имя атрибута на другой стороне. <code>created_by_id</code> создаёт столбец, а <code>created_by</code> и <code>products</code> описывают доступ к объектам. Список товаров отдельным столбцом не хранится.</p>
+    <p><code>TYPE_CHECKING</code> помогает избежать циклического импорта. При запуске обе модели всё равно импортирует lifespan. Разрешаем автору быть <code>None</code>, чтобы старые товары и тестовые данные оставались допустимыми.</p>
+    <p>Если таблица products уже существует, <code>create_all()</code> не добавит столбец. Для упражнения используем новый файл <code>DATABASE_URL=sqlite+pysqlite:///./lesson7.db</code>. Изменение существующей схемы разберём с Alembic в L8.</p>
+    <p><a href="https://sqlmodel.tiangolo.com/tutorial/relationship-attributes/define-relationships-attributes/">SQLModel: объявление связей</a>.</p>
+    <hr>
+
+    <h2>Автор товара и чтение связи</h2>
+    <p>В сервисе товаров расширяем сигнатуру <code>create()</code> и создание объекта. Остальные строки функции сохраняем:</p>
+    <pre class="language-python" data-file="app/services/product.py" data-mode="fragment"><code>def create(product: ProductCreate, db: Session,
+           created_by_id: int | None = None) -&gt; Product:
+    saved = Product.model_validate(
+        product_values(product), update={"created_by_id": created_by_id},
+    )
+    # Далее прежние add(), commit(), refresh() и return saved.
+</code></pre>
+    <p>В POST-обработчике товаров заменяем вызов на <code>return create(product, db, created_by_id=_admin.id)</code>. Автор берётся из проверенного токена. При PUT/PATCH его сохраняем, поскольку поля автора нет во входных схемах.</p>
+    <p>Пока сессия открыта, можно прочитать связанные объекты:</p>
+    <pre class="language-python"><code>with Session(engine) as db:
+    author = get_user_by_username(db, "admin")
+    for product in author.products:
+        print(product.name, product.created_by.username)
+</code></pre>
+    <p>Первое обращение к связи может выполнить дополнительный SELECT. Для ответа API сохраняем отдельные схемы без двусторонних вложений, чтобы избежать рекурсивного ответа и выдачи хэша пароля.</p>
+    <p>Чтобы SQLite проверяла внешние ключи, в <code>create_database_engine()</code> вместо прямого <code>return create_engine(...)</code> добавляем (импорт <code>event</code> из SQLAlchemy):</p>
+    <pre class="language-python" data-file="app/db/database.py" data-mode="replace-block"><code>    engine = create_engine(database_url, **options)
+    if database_url.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def enable_foreign_keys(connection, _):
+            connection.execute("PRAGMA foreign_keys=ON").close()
+    return engine
+</code></pre>
+    <p>Обработчик включает проверку для каждого нового соединения. <a href="https://docs.sqlalchemy.org/en/20/dialects/sqlite.html#foreign-key-support">SQLAlchemy: внешние ключи SQLite</a>.</p>
+    <hr>
+
+    <h2>Тесты: меняем только подготовку данных</h2>
+    <p>Прежние тесты из L6 сохраняем. В <code>tests/conftest.py</code> задаём тестовое окружение до импортов приложения и заменяем фикстуру <code>client</code>. Фикстуру <code>admin_headers</code> оставляем прежней:</p>
+    <pre class="language-python" data-file="tests/conftest.py" data-mode="replace-client-and-imports"><code>import os
+
+os.environ.update(
+    SECRET_KEY="test-" + "x" * 64, DEBUG="false",
+    ADMIN_PASSWORD="admin-pass", USER_PASSWORD="user-pass",
+)
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlmodel import Session
+from app.core.config import get_settings
+from app.db.fake_db import fake_db
+from app.main import create_app
+from app.models.product import Product
+
+
+@pytest.fixture
+def client(tmp_path):
+    settings = get_settings().model_copy(update={
+        "database_url": f"sqlite+pysqlite:///{(tmp_path / 'test.db').as_posix()}",
+    })
+    with TestClient(create_app(settings)) as client:
+        with Session(client.app.state.engine) as db:
+            db.add_all([Product.model_validate(p) for p in fake_db.values()])
+            db.commit()
+        yield client
+</code></pre>
+    <p><code>tmp_path</code> даёт каждому тесту отдельный файл. Lifespan создаёт таблицы и пользователей, затем фикстура добавляет пять товаров. Поэтому прежние ожидания списка, количества и ID сохраняются. База разработчика в тестах не участвует.</p>
+    <p>Расширенные проверки JSON и перезапуска оставляем самостоятельной практикой. Основная команда: <code>uv run pytest -v</code>.</p>
+    <hr>
+
+    <h2>Проверка и практика</h2>
+    <pre class="language-bash"><code>uv run uvicorn app.main:app --reload
+</code></pre>
+    <ol>
+      <li>В Swagger входим как admin. Создаём товар и пользователя alice. Проверяем вход alice, повторное создание с ответом 409 и запрет создания пользователей под её токеном.</li>
+      <li>Перезапускаем сервер с тем же файлом SQLite. Товар сохраняется, alice по-прежнему может войти. Начальные пользователи не дублируются.</li>
+      <li>Создаём несколько товаров от admin. В Session читаем <code>author.products</code> и проверяем <code>product.created_by</code>.</li>
+      <li>Проверяем PATCH с недопустимой скидкой и удаление товара. Запускаем прежние тесты.</li>
+    </ol>
+    <p>В рабочем коде больше нет <code>DbDep</code>, <code>UsersDep</code>, <code>app.state.db</code> и <code>app.state.users</code>. <code>fake_db</code> нужен только тестам. Новые файлы: <code>models/user.py</code>, <code>db/bootstrap.py</code> и <code>routers/user.py</code>.</p>
+    <p>Дополнительно: напишите тест создания пользователя с последующим входом и тест сохранения после перезапуска. В L8 подключим Alembic для изменения схемы существующей БД.</p>
+    <p>Материалы: <a href="https://sqlmodel.tiangolo.com/tutorial/fastapi/session-with-dependency/">Session через зависимость</a>, <a href="https://sqlmodel.tiangolo.com/tutorial/fastapi/update/">обновление данных</a>, <a href="https://sqlmodel.tiangolo.com/tutorial/relationship-attributes/read-relationships/">чтение связей</a>, <a href="https://sqlmodel.tiangolo.com/tutorial/many-to-many/">связь многие ко многим</a>.</p>
+    <hr>
+
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>

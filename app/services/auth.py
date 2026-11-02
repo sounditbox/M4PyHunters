@@ -1,13 +1,36 @@
-from app.core.security import DUMMY_HASH, verify_password
-from app.schemas.auth import UserInDB
+from __future__ import annotations
+
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
+
+from app.core.security import DUMMY_HASH, hash_password, verify_password
+from app.models.user import User
 
 
-def authenticate_user(
-        users: dict[str, UserInDB], username: str, password: str,
-) -> UserInDB | None:
-    user = users.get(username)
-    stored_hash = user.hashed_password if user else DUMMY_HASH
-    valid = verify_password(password, stored_hash)
-    if user is None or not valid:
-        return None
+class UsernameTakenError(ValueError):
+    pass
+
+
+def get_user_by_username(db: Session, username: str) -> User | None:
+    return db.exec(select(User).where(User.username == username)).first()
+
+
+def create_user(db: Session, username: str, password: str,
+                role: str = "user") -> User:
+    user = User(username=username, hashed_password=hash_password(password),
+                role=role)
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise UsernameTakenError(username) from exc
+    db.refresh(user)
     return user
+
+
+def authenticate_user(db: Session, username: str, password: str) -> User | None:
+    user = get_user_by_username(db, username)
+    valid = verify_password(password,
+                            user.hashed_password if user else DUMMY_HASH)
+    return user if user is not None and valid else None

@@ -1,9 +1,13 @@
-from __future__ import annotations
+
+from typing import Optional, TYPE_CHECKING
 
 from sqlalchemy import Column, JSON
-from sqlmodel import SQLModel, Field
+from sqlmodel import SQLModel, Field, Relationship
 
 from app.schemas.product import CategoryName, ProductName, PositivePrice
+
+if TYPE_CHECKING:
+    from app.models.user import User
 
 
 class Product(SQLModel, table=True):
@@ -19,3 +23,5 @@ class Product(SQLModel, table=True):
     specs: dict | None = Field(
         default=None, sa_column=Column(JSON(none_as_null=True), nullable=True),
     )
+    created_by_id: int | None = Field(default=None, foreign_key="users.id")
+    created_by: Optional["User"] = Relationship(back_populates="products")
