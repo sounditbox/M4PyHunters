@@ -1,7 +1,13 @@
 from typing import Annotated
 
 from fastapi import Depends
+from starlette.requests import Request
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 
-SettingsDep = Annotated[Settings, Depends(get_settings)]
+
+def get_app_settings(request: Request) -> Settings:
+    return request.app.state.settings
+
+
+SettingsDep = Annotated[Settings, Depends(get_app_settings)]
