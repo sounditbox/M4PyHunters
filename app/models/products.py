@@ -19,6 +19,7 @@ class Product(SQLModel, table=True):
     price: PositivePrice
     description: str | None = Field(default=None, max_length=500)
     is_available: bool = True
+    stock_count: int = Field(default=0, ge=0)
     sale_price: PositivePrice | None = None
     specs: dict | None = Field(
         default=None, sa_column=Column(JSON(none_as_null=True), nullable=True),

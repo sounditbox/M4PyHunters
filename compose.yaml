@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: products
+      POSTGRES_PASSWORD: products
+      POSTGRES_DB: products
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U products -d products"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:

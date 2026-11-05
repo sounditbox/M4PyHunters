@@ -31,6 +31,7 @@ class ProductBase(SQLModel):
     price: PositivePrice
     description: str | None = Field(default=None, max_length=500)
     is_available: bool = True
+    stock_count: int = Field(default=0, ge=0)
     specs: ProductSpecs | None = None
     sale_price: PositivePrice | None = None
 
@@ -75,5 +76,6 @@ class ProductUpdate(SQLModel):
     price: float | None = Field(default=None, gt=0)
     description: str | None = None
     is_available: bool | None = None
+    stock_count: int | None = Field(default=None, ge=0)
     sale_price: float | None = None
     specs: ProductSpecs | None = None

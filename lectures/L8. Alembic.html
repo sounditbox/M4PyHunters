@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <title>Лекция 8: Alembic и переход на PostgreSQL в Docker</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+<h1>Лекция 8: Alembic и переход на PostgreSQL в Docker</h1>
+<p>В L7 товары и пользователи переехали в SQLModel и SQLite. Теперь научимся менять существующую схему без потери данных: подключим Alembic, создадим начальную ревизию и добавим остаток товара с заполнением старых строк. В конце лекции перенесём проект на PostgreSQL в Docker, чтобы в L9 добавить MongoDB к уже готовой контейнерной инфраструктуре.</p><p>Примеры продолжают текущий код проекта. Блоки с пометкой «заменить» заменяют указанный файл; отдельные поля и фрагменты добавляем в существующие классы. Изменения собираем по порядку, сервер запускаем после применения миграций.</p>
+<hr>
+
+    <h2>Состояние нашего проекта</h2>
+
+<p>В проекте уже есть <code>Product(SQLModel, table=True)</code> в <code>app/models/products.py</code> и <code>User</code> в <code>app/models/user.py</code>. Таблицы называются <code>products</code> и <code>users</code>. Поле <code>products.created_by_id</code> связано с <code>users.id</code>; <code>Relationship</code> описывает переход между объектами.</p>
+<p>Синхронный Engine создаёт <code>app/db/database.py</code>, <code>SessionDep</code> выдаёт Session на запрос. <code>create_app(settings)</code> сохраняет настройки в <code>app.state.settings</code>. Вход выполняется через <code>POST /auth/obtain_token</code>.</p>
+<p>Пока <code>app/core/lifespan.py</code> вызывает <code>SQLModel.metadata.create_all(engine)</code>. Это создаёт отсутствующие таблицы, но не добавляет новые поля в существующие таблицы. На этой границе и нужен Alembic.</p>
+
+    <hr>
+
+    <h2>Проблема: модель изменилась, SQLite-файл остался прежним</h2>
+
+<p>Например, старый файл содержит <code>products</code> без <code>created_by_id</code>. Добавление поля в Python-класс не исправит этот файл. ORM начнёт выбирать новую колонку, а SQLite ответит <code>no such column: products.created_by_id</code>.</p>
+<p>Миграция — явный шаг изменения схемы и, при необходимости, существующих данных. Код модели описывает нужное состояние, файлы миграций — путь к этому состоянию.</p>
+<pre class="language-text"><code>base → 0001: users + products → 0002: stock_count → head
+</code></pre>
+
+    <hr>
+
+    <h2>Что делает Alembic с SQLModel</h2>
+
+<p>Alembic использует SQLAlchemy metadata. У SQLModel она уже есть: <code>SQLModel.metadata</code>. Создавать собственный <code>DeclarativeBase</code> или переписывать модели на <code>Mapped</code> не требуется.</p>
+<table><thead><tr><th>Часть</th><th>Ответственность</th></tr></thead><tbody><tr><td>SQLModel.metadata</td><td>Желаемые таблицы, колонки, индексы и связи после импорта моделей.</td></tr><tr><td>revision --autogenerate</td><td>Сравнить metadata с выбранной БД и записать черновик изменений.</td></tr><tr><td>upgrade / downgrade</td><td>Выполнить прямые / обратные операции из ревизий.</td></tr><tr><td>alembic_version</td><td>Сохранить номер применённой ревизии в самой базе.</td></tr></tbody></table>
+<p>Autogenerate не определяет намерение разработчика: переименование может выглядеть как удаление и добавление. Каждый черновик читаем перед применением.</p>
+    <hr>
+
+    <h2>Установка и структура</h2>
+<pre class="language-powershell"><code>uv add alembic
+uv run alembic init alembic
+</code></pre>
+<pre class="language-text"><code>alembic.ini
+alembic/
+├── env.py
+├── script.py.mako
+└── versions/
+app/
+├── core/config.py
+├── core/lifespan.py
+├── db/database.py
+└── models/
+    ├── __init__.py
+    ├── products.py
+    └── user.py
+</code></pre>
+<p>Команды выполняем из корня проекта. В Git попадут конфигурация и ревизии; сам SQLite-файл не является миграцией. Первую часть проходим на SQLite из L7; в финале PostgreSQL в контейнере станет основной базой проекта.</p>
+    <hr>
+
+    <h2>Имена ограничений и регистрация обеих моделей</h2>
+
+<p>Для первой истории миграций зададим соглашение об именах ограничений. Важно выполнить его до импорта классов таблиц. Заменяем пока пустой <code>app/models/__init__.py</code>:</p>
+<p><b><code>app/models/__init__.py</code> — заменить файл</b></p>
+<pre class="language-python" data-file="app/models/__init__.py" data-mode="replace"><code>from sqlmodel import SQLModel
+
+SQLModel.metadata.naming_convention = {
+    &quot;ix&quot;: &quot;ix_%(column_0_label)s&quot;,
+    &quot;uq&quot;: &quot;uq_%(table_name)s_%(column_0_name)s&quot;,
+    &quot;ck&quot;: &quot;ck_%(table_name)s_%(constraint_name)s&quot;,
+    &quot;fk&quot;: &quot;fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s&quot;,
+    &quot;pk&quot;: &quot;pk_%(table_name)s&quot;,
+}
+
+from app.models.products import Product  # noqa: E402, F401
+from app.models.user import User  # noqa: E402, F401
+</code></pre>
+<p>Теперь импорт пакета регистрирует обе таблицы. Примеры имён: <code>pk_users</code>, <code>ix_users_username</code>, <code>fk_products_created_by_id_users</code>. Для CHECK в этой convention явно задаём <code>name</code>.</p><p>Имена в уже существующей БД могут отличаться. Подключение старого файла к истории разберём отдельно: изменение metadata само по себе не переименовывает ограничения в БД.</p>
+    <hr>
+
+    <h2>Настраиваем alembic.ini</h2>
+
+<p>В созданном файле меняем секцию <code>[alembic]</code>. Остальные секции, включая настройки logging, оставляем: <code>fileConfig()</code> в env.py их использует.</p>
+<p><b><code>alembic.ini</code> — изменить секцию</b></p>
+<pre class="language-ini" data-file="alembic.ini" data-mode="update-section"><code>[alembic]
+script_location = %(here)s/alembic
+prepend_sys_path = %(here)s
+path_separator = os
+
+# Удаляем сгенерированную строку sqlalchemy.url = driver://...
+# URL возьмём из Settings или из config.attributes.
+</code></pre>
+<p>Строка подключения остаётся в <code>Settings.database_url</code>. Не копируем пароль БД в конфигурацию миграций.</p>
+    <hr>
+
+    <h2>Полный env.py для нашего синхронного Engine</h2>
+<p><b><code>alembic/env.py</code> — заменить файл</b></p>
+<pre class="language-python" data-file="alembic/env.py" data-mode="replace"><code>from logging.config import fileConfig
+
+from alembic import context
+from sqlalchemy import pool
+from sqlmodel import SQLModel, create_engine
+
+from app.core.config import get_settings
+from app.models import Product, User  # noqa: F401
+
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = SQLModel.metadata
+
+
+def get_database_url() -&gt; str:
+    # При программном запуске можно передать URL явно.
+    url = config.attributes.get(&quot;database_url&quot;)
+    if url is not None:
+        return url
+    return get_settings().database_url
+
+
+def run_migrations_offline() -&gt; None:
+    url = get_database_url()
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={&quot;paramstyle&quot;: &quot;named&quot;},
+        compare_type=True,
+        render_as_batch=url.startswith(&quot;sqlite&quot;),
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -&gt; None:
+    engine = create_engine(get_database_url(), poolclass=pool.NullPool)
+    try:
+        with engine.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                compare_type=True,
+                render_as_batch=connection.dialect.name == &quot;sqlite&quot;,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        engine.dispose()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+</code></pre>
+<p>CLI берёт URL из Settings. Через config.attributes URL можно передать программно. Alembic и приложение должны работать с одной БД.</p><p>Для metadata импортируем модели, а не app.main. Online подключается к БД и выполняет SQL; offline, выбранный флагом --sql, только выводит SQL-скрипт.</p>
+    <hr>
+
+    <h2>SQLModel-типы в сгенерированных ревизиях</h2>
+
+<p>Alembic может вывести строковый тип как <code>sqlmodel.sql.sqltypes.AutoString(length=80)</code>. Такой файл должен импортировать <code>sqlmodel</code>. Добавляем импорт в шаблон рядом с SQLAlchemy:</p>
+<p><b><code>alembic/script.py.mako</code> — дополнить импорты</b></p>
+<pre class="language-text" data-file="alembic/script.py.mako" data-mode="update-imports"><code>from alembic import op
+import sqlalchemy as sa
+import sqlmodel
+${imports if imports else &quot;&quot;}
+</code></pre>
+<p>В уже созданной ревизии импорт добавляем вручную. Альтернатива — осознанно заменить AutoString на соответствующий <code>sa.String(length=...)</code>. Сам шаблон не исправляет старые файлы.</p>
+    <hr>
+
+    <h2>Первая ревизия: сравниваем с пустой БД</h2>
+
+<p>В текущем <code>products.db</code> таблицы уже могут существовать. Генерация начальной миграции против такого файла даст пустой или неполный результат. Для генерации выбираем новый, ещё не существующий файл. Сохраняем командную переменную только в текущем PowerShell:</p>
+<pre class="language-powershell"><code>$env:DATABASE_URL = &quot;sqlite+pysqlite:///./products_migrations.db&quot;
+uv run alembic revision --autogenerate --rev-id 0001 -m &quot;create users and products&quot;
+</code></pre>
+<p>Убедитесь, что <code>products_migrations.db</code> действительно новый. В ревизии должны появиться <b>обе</b> таблицы, уникальный индекс логина и FK автора товара. Пока не добавляем <code>stock_count</code> в модели: это следующая ревизия.</p>
+    <hr>
+
+    <h2>Начальная ревизия: проверяем содержимое</h2>
+
+<p>Пример полного файла для текущих моделей. Типы и имена проверяем по реальному выводу Alembic; версия генератора может иначе отформатировать код.</p>
+<p><b><code>alembic/versions/0001_create_users_and_products.py</code> — пример полного файла</b></p>
+<pre class="language-python" data-file="alembic/versions/0001_create_users_and_products.py" data-mode="reference"><code>from alembic import op
+import sqlalchemy as sa
+import sqlmodel
+
+revision = &quot;0001&quot;
+down_revision = None
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -&gt; None:
+    op.create_table(
+        &quot;users&quot;,
+        sa.Column(&quot;id&quot;, sa.Integer(), nullable=False),
+        sa.Column(&quot;username&quot;, sqlmodel.AutoString(length=50), nullable=False),
+        sa.Column(&quot;hashed_password&quot;, sqlmodel.AutoString(), nullable=False),
+        sa.Column(&quot;role&quot;, sqlmodel.AutoString(), nullable=False),
+        sa.Column(&quot;disabled&quot;, sa.Boolean(), nullable=False),
+        sa.PrimaryKeyConstraint(&quot;id&quot;, name=op.f(&quot;pk_users&quot;)),
+    )
+    op.create_index(op.f(&quot;ix_users_username&quot;), &quot;users&quot;, [&quot;username&quot;], unique=True)
+    op.create_table(
+        &quot;products&quot;,
+        sa.Column(&quot;id&quot;, sa.Integer(), nullable=False),
+        sa.Column(&quot;name&quot;, sqlmodel.AutoString(length=80), nullable=False),
+        sa.Column(&quot;category&quot;, sqlmodel.AutoString(length=40), nullable=False),
+        sa.Column(&quot;price&quot;, sa.Float(), nullable=False),
+        sa.Column(&quot;description&quot;, sqlmodel.AutoString(length=500), nullable=True),
+        sa.Column(&quot;is_available&quot;, sa.Boolean(), nullable=False),
+        sa.Column(&quot;sale_price&quot;, sa.Float(), nullable=True),
+        sa.Column(&quot;specs&quot;, sa.JSON(none_as_null=True), nullable=True),
+        sa.Column(&quot;created_by_id&quot;, sa.Integer(), nullable=True),
+        sa.ForeignKeyConstraint(
+            [&quot;created_by_id&quot;], [&quot;users.id&quot;],
+            name=op.f(&quot;fk_products_created_by_id_users&quot;),
+        ),
+        sa.PrimaryKeyConstraint(&quot;id&quot;, name=op.f(&quot;pk_products&quot;)),
+    )
+
+
+def downgrade() -&gt; None:
+    op.drop_table(&quot;products&quot;)
+    op.drop_index(op.f(&quot;ix_users_username&quot;), table_name=&quot;users&quot;)
+    op.drop_table(&quot;users&quot;)
+</code></pre>
+<p><code>users</code> создаётся раньше ссылающейся на неё таблицы <code>products</code>. При откате порядок обратный. <code>Relationship</code> не создаёт отдельной колонки: в SQL хранится <code>created_by_id</code>.</p>
+    <hr>
+
+    <h2>Применяем и проверяем историю</h2>
+<pre class="language-powershell"><code>uv run alembic upgrade head
+uv run alembic current
+uv run alembic history
+uv run alembic check
+</code></pre>
+<p>На новом файле ревизия 0001 создаст таблицы, а в <code>alembic_version</code> появится номер 0001. <code>check</code> должен сообщить, что новых операций нет. Он сравнивает выбранную БД с текущими моделями, а не просто ищет неприменённые файлы.</p><p>Миграция создаёт схему. Она не создаёт admin и user: начальные записи по-прежнему добавляет <code>seed_users()</code>.</p>
+    <hr>
+
+    <h2>Что делать с уже существующим products.db</h2>
+<table><thead><tr><th>Состояние файла</th><th>Действие</th></tr></thead><tbody><tr><td>Новый пустой файл</td><td>Выполнить <code>upgrade head</code>.</td></tr><tr><td>Схема уже в точности соответствует 0001</td><td>После проверки и резервной копии выполнить <code>stamp 0001</code>.</td></tr><tr><td>Старая схема, например нет created_by_id или users</td><td>Подготовить отдельный путь перехода: описать старую baseline, затем ревизию добавления users/FK и переноса данных.</td></tr></tbody></table>
+<pre class="language-powershell"><code># Сервер остановлен; файл существует.
+Copy-Item -LiteralPath ./products.db -Destination ./products.before-alembic.db
+$env:DATABASE_URL = &quot;sqlite+pysqlite:///./products.db&quot;
+
+# Только если таблицы, колонки, индексы и ограничения соответствуют 0001:
+uv run alembic stamp 0001
+uv run alembic check
+</code></pre>
+<p><b>stamp не выполняет DDL и не проверяет схему.</b> Он лишь записывает номер ревизии. Если не хватает <code>created_by_id</code>, stamp это не исправит. Сравниваем существующий файл с чистой БД после 0001; различия имён ограничений также требуют проверки.</p><p>Если учебные данные не нужны, можно начать с отдельного нового файла и сохранить старый как копию. Не запускаем первую <code>create_table</code>-ревизию поверх уже существующих таблиц и не помечаем старую схему как <code>head</code> вслепую.</p>
+    <hr>
+
+    <h2>Убираем create_all из lifespan</h2>
+
+<p>После применения миграций заменяем файл. Используем существующие функции и настройки проекта; Session factory не вводим.</p>
+<p><b><code>app/core/lifespan.py</code> — заменить файл</b></p>
+<pre class="language-python" data-file="app/core/lifespan.py" data-mode="replace"><code>import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from sqlmodel import Session
+
+from app.core.logging_conf import configure_logging
+from app.db.bootstrap import seed_users
+from app.db.database import create_database_engine
+
+logger = logging.getLogger(&quot;lifespan&quot;)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = app.state.settings
+    configure_logging()
+    logger.info(&quot;App starting up...&quot;)
+    engine = create_database_engine(settings.database_url)
+    try:
+        app.state.engine = engine
+        if settings.debug:
+            with Session(engine) as db:
+                seed_users(db, settings)
+        yield
+    finally:
+        engine.dispose()
+    logger.info(&quot;App shutting down...&quot;)
+</code></pre>
+<p>Перед запуском API выполняем <code>uv run alembic upgrade head</code> для того же URL. Миграции выполняются отдельной командой один раз на развёртывание, а не каждым worker при старте.</p><p>Сохраняем текущую политику проекта: bootstrap запускается только при <code>debug=True</code>. Для чистой БД с <code>DEBUG=False</code> администратора нужно создать отдельной административной командой до входа.</p>
+    <hr>
+
+    <h2>Второе изменение: остаток товара</h2>
+
+<p>Добавим <code>stock_count</code>. В проекте таблица Product и схемы API описаны отдельно, поэтому изменяем три места:</p>
+<pre class="language-python" data-mode="add-fields"><code># app/models/products.py — поле класса Product
+stock_count: int = Field(default=0, ge=0)
+
+# app/schemas/product.py — поле класса ProductBase
+stock_count: int = Field(default=0, ge=0)
+
+# app/schemas/product.py — поле класса ProductUpdate
+stock_count: int | None = Field(default=None, ge=0)
+</code></pre>
+<p>В файле модели <code>Field</code> уже импортирован из SQLModel; в схемах — из Pydantic. ProductCreate и ProductRead наследуют ProductBase. Сервис PATCH повторно проверяет итоговый ProductCreate, поэтому явный <code>stock_count: null</code> получит 422.</p><p><code>default=0</code> работает на стороне Python, <code>ge=0</code> — при валидации. Это не backfill существующих строк и не SQL CHECK. Прямой SQL не получает эти гарантии автоматически.</p>
+    <hr>
+
+    <h2>Генерируем черновик второй ревизии</h2>
+<pre class="language-powershell"><code>uv run alembic current
+uv run alembic revision --autogenerate --rev-id 0002 -m &quot;add stock count&quot;
+</code></pre>
+<p>Выбранная БД должна быть на 0001. Если сгенерированное <code>add_column(... nullable=False)</code> применить к таблице со строками, новым записям колонок неоткуда взять значение. Исправляем черновик до upgrade.</p>
+    <hr>
+
+    <h2>Backfill: сначала данные, затем NOT NULL</h2>
+<p><b><code>alembic/versions/0002_add_stock_count.py</code> — заменить файл</b></p>
+<pre class="language-python" data-file="alembic/versions/0002_add_stock_count.py" data-mode="replace"><code>from alembic import op
+import sqlalchemy as sa
+
+revision = &quot;0002&quot;
+down_revision = &quot;0001&quot;
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -&gt; None:
+    op.add_column(
+        &quot;products&quot;, sa.Column(&quot;stock_count&quot;, sa.Integer(), nullable=True),
+    )
+    products = sa.table(&quot;products&quot;, sa.column(&quot;stock_count&quot;, sa.Integer()))
+    op.get_bind().execute(
+        products.update()
+        .where(products.c.stock_count.is_(None))
+        .values(stock_count=0)
+    )
+    with op.batch_alter_table(&quot;products&quot;) as batch:
+        batch.alter_column(
+            &quot;stock_count&quot;, existing_type=sa.Integer(), nullable=False,
+        )
+
+
+def downgrade() -&gt; None:
+    with op.batch_alter_table(&quot;products&quot;) as batch:
+        batch.drop_column(&quot;stock_count&quot;)
+</code></pre>
+<p>Backfill заполняет новое поле у старых товаров. Используем локальное описание <code>sa.table</code>, а не импорт актуальной модели Product: она будет меняться, историческая миграция должна оставаться воспроизводимой.</p><p>На время этого учебного перехода запись в API останавливаем. Для приложения без остановки потребовалось бы несколько совместимых этапов развёртывания. Downgrade удалит остатки из БД; это потеря данных, а не восстановление их прошлых значений.</p>
+    <hr>
+
+    <h2>Почему batch mode важен для SQLite</h2>
+
+<p>SQLite поддерживает не все изменения через ALTER TABLE. <code>batch_alter_table()</code> при необходимости создаёт временную таблицу нужной структуры, копирует строки, удаляет старую таблицу и переименовывает новую.</p>
+<p><code>render_as_batch=True</code> помогает autogenerate выводить такой код, но не выполняет миграцию и не заполняет данные за нас. На других СУБД тот же batch-блок обычно использует обычный ALTER.</p>
+<p>Для нашей синхронной SQLite-конфигурации выполняем online-миграции. Вывод через <code>--sql</code> не всегда работает для batch-пересоздания: без подключения Alembic не может отразить старую структуру таблицы.</p>
+
+    <hr>
+
+    <h2>Переименование — не удаление поля</h2>
+
+<p>Если переименуем <code>description</code> в <code>details</code>, autogenerate может предложить drop + add. Вместо этого используем переименование; это отдельный пример, его не добавляем к упражнению stock_count.</p>
+<pre class="language-python" data-mode="example"><code>def upgrade() -&gt; None:
+    with op.batch_alter_table(&quot;products&quot;) as batch:
+        batch.alter_column(
+            &quot;description&quot;, new_column_name=&quot;details&quot;,
+            existing_type=sa.String(length=500), existing_nullable=True,
+        )
+
+
+def downgrade() -&gt; None:
+    with op.batch_alter_table(&quot;products&quot;) as batch:
+        batch.alter_column(
+            &quot;details&quot;, new_column_name=&quot;description&quot;,
+            existing_type=sa.String(length=500), existing_nullable=True,
+        )
+</code></pre>
+<p>Согласованно меняем модель, схемы и API. Alembic не знает, что два разных имени означают одну и ту же колонку.</p>
+    <hr>
+
+<h2>Рабочий цикл и команды</h2>
+<table><thead><tr><th>Команда</th><th>Результат</th></tr></thead><tbody><tr><td><code>uv run alembic current</code></td><td>Текущая ревизия выбранной БД.</td></tr><tr><td><code>uv run alembic heads</code></td><td>Конечные ревизии файлов истории.</td></tr><tr><td><code>uv run alembic history</code></td><td>Цепочка через down_revision.</td></tr><tr><td><code>uv run alembic upgrade head</code></td><td>Применение непройденных шагов.</td></tr><tr><td><code>uv run alembic downgrade -1</code></td><td>Откат одного шага на тестовой БД.</td></tr><tr><td><code>uv run alembic check</code></td><td>Есть ли различия, для которых autogenerate создал бы операции.</td></tr></tbody></table>
+<p>Последовательность: изменить модель → создать черновик → проверить операции и данные → проверить чистую и заполненную БД → применить миграции → запустить API. Применённые в общей среде ревизии не переписываем: создаём следующую.</p>
+    <hr>
+
+    <h2>Переходим на PostgreSQL в Docker</h2>
+
+<p>Теперь сделаем PostgreSQL основной SQL-базой проекта. FastAPI и Alembic пока запускаются локально через uv; в контейнер переносим сервер БД. В L9 добавим в этот же Compose сервис mongo.</p>
+<p>Сначала остановите API. Сохраните копию SQLite-файла, с которым прошли миграции, и убедитесь, что он на 0002. Файл остаётся источником для переноса; не удаляем его после переключения URL.</p>
+<pre class="language-powershell"><code>uv add &quot;psycopg[binary]&quot;
+</code></pre>
+<p>SQLAlchemy использует psycopg 3 через диалект <code>postgresql+psycopg</code>. Наш <code>create_database_engine()</code> уже подходит: check_same_thread задаётся только для SQLite.</p>
+    <hr>
+
+    <h2>Compose: сервер PostgreSQL и постоянный том</h2>
+<p><b><code>compose.yaml</code> — новый файл</b></p>
+<pre class="language-yaml" data-file="compose.yaml" data-mode="create"><code>services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: products
+      POSTGRES_PASSWORD: products
+      POSTGRES_DB: products
+    ports:
+      - &quot;127.0.0.1:5432:5432&quot;
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [&quot;CMD-SHELL&quot;, &quot;pg_isready -U products -d products&quot;]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
+</code></pre>
+<pre class="language-powershell"><code>docker compose up -d --wait postgres
+docker compose ps
+docker compose exec postgres psql -U products -d products -c &quot;SELECT version();&quot;
+</code></pre>
+
+<p>В примере используем PostgreSQL 17: его каталог данных монтируем в <code>/var/lib/postgresql/data</code>. Healthcheck и --wait позволяют дождаться готовности сервера, а named volume postgres_data сохраняет данные при пересоздании контейнера.</p>
+<p>POSTGRES_USER, POSTGRES_PASSWORD и POSTGRES_DB инициализируют только пустой каталог. Изменение этих значений в Compose не меняет уже созданные роли и базы. Учебные реквизиты задаём прямо в Compose; в .env приложения добавляем только известные поля Settings.</p>
+<p>Имя Compose-проекта и путь к compose.yaml сохраняем между L8 и L9, чтобы использовать тот же postgres_data. Обычный <code>docker compose down</code> оставляет том, а <code>down --volumes</code> удаляет данные и не является способом обычного перезапуска.</p>
+
+    <hr>
+
+    <h2>Переключаем настройки приложения и Alembic</h2>
+<p><b><code>.env</code> — обновить значения, остальные поля оставить</b></p>
+<pre class="language-ini" data-file=".env" data-mode="update-values"><code>DATABASE_URL=postgresql+psycopg://products:products@127.0.0.1:5432/products
+DEBUG=True
+</code></pre>
+<p>Замените прежнюю строку DATABASE_URL, не добавляйте вторую. DEBUG=True нужен только для нашего локального bootstrap; остальные текущие SECRET_KEY и пароли сохраняем. Такой URL добавляем и в .env.example.</p><p><b><code>app/core/config.py</code> — заменить поле класса</b></p>
+<pre class="language-python" data-file="app/core/config.py" data-mode="replace-field"><code>database_url: str = &quot;postgresql+psycopg://products:products@127.0.0.1:5432/products&quot;
+</code></pre>
+<pre class="language-powershell"><code># Убираем SQLite-URL, который задавали в текущем PowerShell выше:
+Remove-Item Env:DATABASE_URL -ErrorAction SilentlyContinue
+uv run alembic upgrade head
+uv run alembic current
+uv run alembic check
+docker compose exec postgres psql -U products -d products -c &quot;SELECT * FROM alembic_version;&quot;
+</code></pre>
+
+<p>Переменная окружения имеет приоритет над .env, поэтому её важно убрать или явно заменить. И API, и Alembic должны смотреть в один PostgreSQL.</p>
+<p>В новой базе повторно применяются 0001 и 0002. Не генерируем новую initial-миграцию и не выполняем stamp на пустой PostgreSQL. Типы и SERIAL для первичных ключей выбирает PostgreSQL-диалект; batch-блок второй ревизии здесь выполняет обычный ALTER.</p>
+<p>URL с 127.0.0.1 верен для Python-процессов на компьютере. Внутри другого контейнера понадобился бы хост postgres, имя сервиса Compose, а не localhost. Контейнер API в этих двух лекциях не создаём.</p>
+
+    <hr>
+
+    <h2>Схема и перенос данных — разные операции</h2>
+
+<p>Upgrade создаёт в PostgreSQL таблицы, но не копирует строки из SQLite. До первого запуска API перенесём users и products, сохранив id, хеши паролей, JSON specs и created_by_id.</p>
+<p>Если старые данные нужны, выполните скрипт до первого старта API. Обе базы должны быть на 0002, таблицы PostgreSQL — пустыми. Для нового учебного каталога этот шаг можно пропустить.</p>
+<p><b><code>scripts/copy_sqlite_to_postgres.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="scripts/copy_sqlite_to_postgres.py" data-mode="create"><code>import argparse
+from pathlib import Path
+
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
+
+from app.core.config import get_settings
+from app.db.database import create_database_engine
+from app.models import Product, User
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(&quot;--source-url&quot;, required=True)
+    args = parser.parse_args()
+    source_url = make_url(args.source_url)
+    target_url = make_url(get_settings().database_url)
+    if source_url.get_backend_name() != &quot;sqlite&quot;:
+        raise RuntimeError(&quot;Источник должен быть SQLite&quot;)
+    if not source_url.database or not Path(source_url.database).is_file():
+        raise RuntimeError(&quot;Файл SQLite не найден&quot;)
+    if target_url.get_backend_name() != &quot;postgresql&quot;:
+        raise RuntimeError(&quot;Назначение должно быть PostgreSQL&quot;)
+
+    source_engine = create_database_engine(args.source_url)
+    target_engine = create_database_engine(target_url.render_as_string(hide_password=False))
+    try:
+        with source_engine.connect() as source, target_engine.begin() as target:
+            for connection in (source, target):
+                versions = connection.execute(
+                    text(&quot;SELECT version_num FROM alembic_version&quot;)
+                ).scalars().all()
+                if versions != [&quot;0002&quot;]:
+                    raise RuntimeError(&quot;Обе базы должны быть на ревизии 0002&quot;)
+            tables = (User.__table__, Product.__table__)
+            for table in tables:
+                if target.scalar(select(func.count()).select_from(table)):
+                    raise RuntimeError(&quot;Таблицы PostgreSQL должны быть пустыми&quot;)
+
+            for table in tables:
+                rows = source.execute(select(table)).mappings().all()
+                if rows:
+                    target.execute(table.insert(), [dict(row) for row in rows])
+                sequence = target.scalar(
+                    text(&quot;SELECT pg_get_serial_sequence(:table_name, &#x27;id&#x27;)&quot;),
+                    {&quot;table_name&quot;: table.name},
+                )
+                if sequence is None:
+                    raise RuntimeError(f&quot;Не найдена sequence таблицы {table.name}&quot;)
+                last_id = target.scalar(select(func.max(table.c.id)))
+                target.execute(
+                    text(&quot;SELECT setval(CAST(:sequence AS regclass), :value, :called)&quot;),
+                    {&quot;sequence&quot;: sequence, &quot;value&quot;: last_id or 1,
+                     &quot;called&quot;: last_id is not None},
+                )
+                print(f&quot;{table.name}: скопировано {len(rows)} строк&quot;)
+    finally:
+        target_engine.dispose()
+        source_engine.dispose()
+
+
+if __name__ == &quot;__main__&quot;:
+    main()
+</code></pre>
+<pre class="language-powershell"><code>uv run python -m scripts.copy_sqlite_to_postgres --source-url &quot;sqlite+pysqlite:///./products_migrations.db&quot;
+</code></pre>
+
+<p>Команду выполняем из корня проекта; в scripts добавляем пустой __init__.py. Если мигрировали другой SQLite-файл, указываем его URL. Скрипт не копирует alembic_version: PostgreSQL уже получил собственную историю через upgrade.</p>
+<p>Вставка явных id в PostgreSQL не продвигает sequence автоматически. Поэтому после переноса скрипт выставляет её за максимальный id. Иначе следующий POST мог бы получить уже занятый номер. Данные вставляются в одной транзакции: сначала users, затем products. Скрипт загружает строки в память и подходит для учебного каталога; большой перенос требует отдельного процесса.</p>
+<p>Для совершенно нового учебного каталога перенос можно пропустить и наполнить PostgreSQL через API. В этом случае старые SQLite-данные остаются только в сохранённом файле, а локальный seed создаст начальных пользователей при старте.</p>
+
+    <hr>
+
+    <h2>Проверяем приложение уже на PostgreSQL</h2>
+<pre class="language-powershell"><code>uv run uvicorn app.main:app --reload
+</code></pre>
+
+<ol>
+<li>Войдите через POST /auth/obtain_token с перенесёнными учётными данными или локальным admin.</li>
+<li>Проверьте GET /products и /health: число товаров должно совпасть с перенесённым набором.</li>
+<li>Создайте новый товар. Его id должен быть новым, а created_by_id — ссылаться на пользователя в PostgreSQL.</li>
+<li>Проверьте PUT, PATCH, DELETE и сохранность specs и stock_count.</li>
+<li>Перезапустите контейнер через docker compose restart postgres, затем API: товары должны сохраниться в postgres_data.</li>
+</ol>
+<p>Если база пуста при DEBUG=False, сначала нужен отдельный административный bootstrap. Локальная инструкция здесь использует DEBUG=True; миграции сами пользователей не создают.</p>
+
+    <hr>
+
+<h2>Практика и критерии готовности</h2>
+
+<ol>
+<li>Создайте 0001 на новом файле и проверьте users, products, FK автора, уникальный логин.</li>
+<li>Уберите create_all из lifespan. Подготовьте таблицы до запуска API; в debug проверьте вход admin через obtain_token.</li>
+<li>Добавьте stock_count в таблицу и схемы, создайте 0002 с backfill. Старые товары должны сохраниться и получить 0.</li>
+<li>Выполните check. На отдельной учебной БД проверьте развёртывание с нуля, переход с 0001 на заполненной таблице и откат.</li>
+<li>Поднимите PostgreSQL через compose.yaml, переключите Settings и .env, примените существующие ревизии и перенесите учебные данные. Проверьте новый id после переноса.</li>
+
+</ol>
+<p>Дополнительно: добавьте именованный SQL CHECK для неотрицательного stock_count и проверьте отклонение отрицательного значения при прямом INSERT. <code>ge=0</code> в API эту проверку не заменяет.</p>
+<p>После L8 Products API работает с PostgreSQL в Docker, схема подготовлена существующими миграциями. В L9 расширим тот же compose.yaml сервисом MongoDB; PostgreSQL и его том сохранятся.</p>
+
+    <hr>
+
+    <h2>Официальные материалы</h2>
+
+<ul>
+<li><a href="https://alembic.sqlalchemy.org/en/latest/tutorial.html">Alembic: окружение, ревизии и команды</a>.</li>
+<li><a href="https://alembic.sqlalchemy.org/en/latest/autogenerate.html">Autogenerate: сравнение metadata и ограничения генерации</a>.</li>
+<li><a href="https://alembic.sqlalchemy.org/en/latest/batch.html">Batch-миграции для SQLite</a>.</li>
+<li><a href="https://alembic.sqlalchemy.org/en/latest/cookbook.html">Cookbook: программный запуск и подключение существующей схемы</a>.</li>
+<li><a href="https://sqlmodel.tiangolo.com/tutorial/create-db-and-table/">SQLModel: metadata и создание таблиц</a>.</li>
+<li><a href="https://hub.docker.com/_/postgres">Официальный образ PostgreSQL: инициализация и тома</a>.</li>
+<li><a href="https://docs.docker.com/reference/cli/docker/compose/up/">Compose up и ожидание готовности через --wait</a>.</li>
+<li><a href="https://docs.sqlalchemy.org/en/20/dialects/postgresql.html#module-sqlalchemy.dialects.postgresql.psycopg">SQLAlchemy и psycopg 3</a>.</li>
+</ul>
+
+    <hr>
+
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,6 +1,6 @@
 def test_login(client):
     response = client.post(
-        "/auth/token",
+        "/auth/obtain_token",
         data={"username": "admin", "password": "admin-pass"},
     )
 

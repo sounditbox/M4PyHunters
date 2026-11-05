@@ -54,7 +54,8 @@ def test_replace_product(client, admin_headers):
     replacement = {"name": "Product 42", "category": "electronics",
                    "price": 1234,
                    "description": "Product 1 super description",
-                   "is_available": False, "specs": None, "sale_price": None}
+                   "is_available": False, "specs": None, "sale_price": None,
+                   "stock_count": 0}
 
     response = client.put(
         '/products/1',
@@ -92,3 +93,41 @@ def test_invalid_price(client, admin_headers, price):
     assert response.status_code == 422
     errors = response.json()["detail"]
     assert any(error["loc"] == ["body", "price"] for error in errors)
+
+
+def test_stock_count_is_saved(client, admin_headers):
+    payload = {
+        "name": "Gaming Mouse", "category": "electronics", "price": 49.9,
+        "stock_count": 12,
+        "specs": {"weight_grams": 80, "color": "black", "tags": ["gaming"]},
+    }
+    created = client.post("/products", json=payload, headers=admin_headers)
+    assert created.status_code == 201
+    product_id = created.json()["id"]
+    assert created.json()["stock_count"] == 12
+    assert created.json()["specs"] == payload["specs"]
+
+    patched = client.patch(
+        f"/products/{product_id}", json={"stock_count": 0}, headers=admin_headers,
+    )
+    assert patched.status_code == 200
+    saved = client.get(f"/products/{product_id}", headers=admin_headers)
+    assert saved.json()["stock_count"] == 0
+    assert saved.json()["specs"] == payload["specs"]
+
+
+@pytest.mark.parametrize("stock_count", [-1, None])
+def test_invalid_stock_count(client, admin_headers, stock_count):
+    response = client.post(
+        "/products",
+        json={"name": "Gaming Mouse", "category": "electronics", "price": 49.9,
+              "stock_count": stock_count},
+        headers=admin_headers,
+    )
+    assert response.status_code == 422
+    response = client.patch(
+        "/products/1", json={"stock_count": stock_count}, headers=admin_headers,
+    )
+    assert response.status_code == 422
+    saved = client.get("/products/1", headers=admin_headers)
+    assert saved.json()["stock_count"] == 0

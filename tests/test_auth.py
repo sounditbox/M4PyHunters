@@ -12,7 +12,7 @@ def test_token_required(client, path):
 @pytest.mark.parametrize("username", ["admin", "unknown"])
 def test_invalid_login(client, username):
     response = client.post(
-        "/auth/token",
+        "/auth/obtain_token",
         data={"username": username, "password": "wrong-password"},
     )
 
@@ -23,7 +23,7 @@ def test_invalid_login(client, username):
 
 def test_user_cannot_create_product(client):
     login = client.post(
-        "/auth/token",
+        "/auth/obtain_token",
         data={"username": "user", "password": "user-pass"},
     )
     assert login.status_code == 200
