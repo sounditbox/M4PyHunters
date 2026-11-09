@@ -19,6 +19,7 @@ def test_app_settings_are_used_and_isolated(
             app_name=f"Test app {index}",
             debug=True,
             database_url=f"sqlite+pysqlite:///{tmp_path / f'app-{index}.db'}",
+            mongodb_url=None,
             secret_key=key * 64,
             admin_password=f"admin-pass-{index}",
             user_password=f"user-pass-{index}",

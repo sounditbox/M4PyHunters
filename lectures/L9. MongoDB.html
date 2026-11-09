@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <title>Лекция 9: MongoDB для расширенных характеристик товаров</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+<h1>Лекция 9: MongoDB для расширенных характеристик товаров</h1>
+<p>Добавим MongoDB для расширенных характеристик. Читаем их вместе с товаром, изменяем отдельными PUT, PATCH и DELETE.</p>
+<p>Товары и пользователи остаются в PostgreSQL. Используем прежние JWT, роли и слои: router → service → хранилище; данные проверяют schemas.</p>
+<hr>
+
+    <h2>Зачем здесь документная база</h2>
+
+<p>Общие характеристики — вес, цвет, теги — уже хранятся в SQL JSON-поле <code>Product.specs</code>.</p>
+<p>У клавиатуры есть layout и switch, у монитора — refresh_rate и panel. Эти разные наборы полей сохраним отдельными документами в MongoDB.</p>
+<table><thead><tr><th>Оставляем в SQL</th><th>Добавляем в MongoDB</th></tr></thead><tbody><tr><td>id, name, category, price, sale_price</td><td>Характеристики конкретной категории: layout, switch, refresh_rate.</td></tr><tr><td>is_available, stock_count после L8</td><td>Время создания и изменения документа характеристик.</td></tr><tr><td>specs: weight_grams, color, tags</td><td>Не дублируем общие specs во второй базе.</td></tr><tr><td>users и created_by_id</td><td>product_id как ссылка уровня приложения.</td></tr></tbody></table>
+<p>SQL JSON тоже подходит для этой задачи. Здесь изучаем документную модель и работу с двумя базами.</p>
+    <hr>
+
+    <h2>Основные понятия MongoDB</h2>
+<table><thead><tr><th>Понятие</th><th>В проекте</th></tr></thead><tbody><tr><td>Database</td><td><code>products</code>: пространство коллекций.</td></tr><tr><td>Collection</td><td><code>product_attributes</code>: документы одного назначения.</td></tr><tr><td>Document</td><td>Набор расширенных характеристик одного товара.</td></tr><tr><td>BSON</td><td>Формат хранения с типами ObjectId, datetime, числами и вложенными объектами.</td></tr><tr><td>_id</td><td>Уникальный идентификатор документа; в нашем случае ObjectId.</td></tr></tbody></table>
+<p>MongoDB — документная NoSQL-база. Другие модели NoSQL: key-value и graph. Гибкую структуру документов ограничим схемами API и индексами.</p>
+    <hr>
+
+    <h2>Документ расширенных характеристик</h2>
+<pre class="language-json"><code>{
+  &quot;_id&quot;: {&quot;$oid&quot;: &quot;6697bbef47e2631f1492be5a&quot;},
+  &quot;product_id&quot;: 42,
+  &quot;attributes&quot;: {
+    &quot;layout&quot;: &quot;ANSI&quot;,
+    &quot;switch&quot;: &quot;brown&quot;,
+    &quot;wireless&quot;: false
+  },
+  &quot;created_at&quot;: {&quot;$date&quot;: &quot;2026-11-02T12:00:00Z&quot;},
+  &quot;updated_at&quot;: {&quot;$date&quot;: &quot;2026-11-02T12:00:00Z&quot;}
+}
+</code></pre>
+<p>Это Extended JSON: <code>$oid</code> представляет ObjectId, <code>$date</code> — дату BSON. В Python получим ObjectId и datetime. PUT/PATCH возвращают строковый id документа и даты ISO 8601; GET товара включает только attributes.</p>
+<p>Один товар — один документ. Связь с SQL-товаром проверяет API: FOREIGN KEY между базами нет.</p>
+    <hr>
+
+    <h2>Embedding и reference</h2>
+<pre class="language-text"><code>PostgreSQL                              MongoDB
+users ── products.created_by_id          product_attributes
+         products.id = 42  ···········&gt;   product_id = 42
+                                         attributes = {...}
+</code></pre>
+<p><b>Reference:</b> <code>product_id</code> ссылается на SQL-товар. <b>Embedding:</b> <code>attributes</code> встроен в документ, поскольку характеристики читаются вместе. Цену, название и данные пользователя не дублируем.</p>
+    <hr>
+
+    <h2>Добавляем MongoDB в Compose</h2>
+
+<p>Добавляем <code>mongo</code> и том <code>mongo_data</code>. Сохраняем PostgreSQL, его том и имя Compose-проекта.</p>
+<p><b><code>compose.yaml</code> — заменить файл</b></p>
+<pre class="language-yaml" data-file="compose.yaml" data-mode="replace"><code>services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: products
+      POSTGRES_PASSWORD: products
+      POSTGRES_DB: products
+    ports:
+      - &quot;127.0.0.1:5432:5432&quot;
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [&quot;CMD-SHELL&quot;, &quot;pg_isready -U products -d products&quot;]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mongo:
+    image: mongo:8.0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo
+      MONGO_INITDB_ROOT_PASSWORD: mongo
+    ports:
+      - &quot;27017:27017&quot;
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: [&quot;CMD-SHELL&quot;, &quot;mongosh --quiet -u mongo -p mongo --authenticationDatabase admin --eval &#x27;db.adminCommand({ping: 1}).ok&#x27;&quot;]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  postgres_data:
+  mongo_data:
+</code></pre>
+<pre class="language-powershell"><code>docker compose up -d --wait postgres mongo
+docker compose ps
+</code></pre>
+
+<p>Базы работают в контейнерах, Python API — локально. Отдельные тома сохраняют данные. Базы запускаются независимо, поэтому <code>depends_on</code> не нужен.</p>
+<p>Перезапуск: <code>docker compose restart</code>. <code>down --volumes</code> удаляет данные. Начальные логин и пароль Mongo создаются только на пустом томе.</p>
+
+    <hr>
+
+<h2>CRUD в mongosh</h2>
+
+<p>Сначала откройте mongosh из терминала проекта:</p>
+<pre class="language-powershell"><code>docker compose exec mongo mongosh -u mongo -p mongo --authenticationDatabase admin
+</code></pre>
+<p>Далее работаем внутри mongosh, в отдельной учебной базе:</p>
+<pre class="language-javascript"><code>use products_playground
+
+db.product_attributes.insertOne({
+  product_id: 42,
+  attributes: {layout: &quot;ANSI&quot;, wireless: false}
+})
+
+db.product_attributes.findOne({product_id: 42})
+
+db.product_attributes.updateOne(
+  {product_id: 42},
+  {$set: {&quot;attributes.wireless&quot;: true}}
+)
+
+db.product_attributes.deleteOne({product_id: 42})
+</code></pre>
+<p>Первый аргумент — фильтр, второй — изменение. <code>$set</code> задаёт значение, точка в пути обращается к вложенному полю. Учебные документы не попадают в базу API.</p>
+    <hr>
+
+    <h2>Фильтр и выбор полей</h2>
+<pre class="language-javascript"><code>db.product_attributes.insertOne({
+  product_id: 43,
+  attributes: {refresh_rate: 144, panel: &quot;IPS&quot;}
+})
+
+db.product_attributes.find(
+  {&quot;attributes.refresh_rate&quot;: {$gte: 120}},
+  {_id: 0, product_id: 1, &quot;attributes.refresh_rate&quot;: 1}
+).sort({&quot;attributes.refresh_rate&quot;: -1}).limit(10)
+
+db.product_attributes.updateOne(
+  {product_id: 43},
+  {$unset: {&quot;attributes.panel&quot;: &quot;&quot;}}
+)
+</code></pre>
+<p><code>$gte: 120</code> — не меньше 120. Второй аргумент find — projection: <code>1</code> включает поле, <code>_id: 0</code> скрывает id. В sort <code>-1</code> задаёт убывание, <code>limit(10)</code> — до 10 документов.</p>
+<p><code>$unset</code> удаляет поле, <code>$inc</code> увеличивает число. В API фильтры строим сами: произвольные Mongo-операторы от клиента не принимаем.</p>
+    <hr>
+
+    <h2>Драйвер и настройки</h2>
+<pre class="language-powershell"><code>uv add pymongo
+</code></pre>
+<p>Драйвер — PyMongo, клиент — <code>AsyncMongoClient</code>.</p><p><b><code>app/core/config.py</code> — добавить поля в Settings</b></p>
+<pre class="language-python" data-file="app/core/config.py" data-mode="add-settings-fields"><code>mongodb_url: str | None = None
+mongodb_database: str = &quot;products&quot;
+</code></pre>
+<p><b><code>.env</code> — добавить значения</b></p>
+<pre class="language-ini" data-file=".env" data-mode="add-values"><code>DATABASE_URL=postgresql+psycopg://products:products@127.0.0.1:5432/products
+MONGODB_URL=mongodb://mongo:mongo@127.0.0.1:27017/?authSource=admin
+MONGODB_DATABASE=products
+</code></pre>
+<p><code>authSource=admin</code>: пользователь Mongo создан в admin, документы храним в products. Дополняем <code>.env.example</code>; SQL DATABASE_URL сохраняем.</p>
+<p>Локальный API использует <code>127.0.0.1</code>; API в контейнере использовал бы имена <code>postgres</code> и <code>mongo</code>. Без MONGODB_URL Mongo отключена: SQL-запись и /health работают, составные GET вернут 503. Пустую строку не задаём.</p>
+    <hr>
+
+    <h2>Структура новых файлов</h2>
+<pre class="language-text"><code>app/
+├── core/
+│   ├── config.py                # два новых поля
+│   └── lifespan.py              # SQL Engine + AsyncMongoClient
+├── db/mongodb.py               # индекс коллекции
+├── dependencies/
+│   ├── mongodb.py              # MongoDatabaseDep
+│   └── product.py              # товар из SQL и его id
+├── schemas/product_attributes.py
+├── services/product_attributes.py
+├── routers/product.py          # GET товара и списка
+├── routers/product_attributes.py # PUT, PATCH, DELETE
+└── main.py                     # router и обработчики ошибок
+</code></pre>
+<p>У блоков указаны файлы. «Продолжение» дописываем в тот же файл. В обычных GET появится attributes; запись SQL-товаров и авторизацию сохраняем.</p>
+    <hr>
+
+    <h2>Уникальный индекс: один товар — один документ</h2>
+<p><b><code>app/db/mongodb.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="app/db/mongodb.py" data-mode="create"><code>from pymongo.asynchronous.database import AsyncDatabase
+
+
+async def ensure_product_attribute_indexes(database: AsyncDatabase) -&gt; None:
+    await database[&quot;product_attributes&quot;].create_index(
+        &quot;product_id&quot;, unique=True, name=&quot;uq_product_attributes_product_id&quot;,
+    )
+</code></pre>
+<p>Два запроса могут одновременно выполнить find и не найти документ. Только <code>unique=True</code> запрещает дубли в базе. Если дубли уже есть, индекс не создастся.</p>
+<p>В учебном приложении создаём индекс при старте, в рабочем — отдельным этапом. Alembic управляет только SQL.</p>
+    <hr>
+
+    <h2>Один клиент внутри lifespan</h2>
+
+<p>Добавляем Mongo-клиент к SQL Engine. Таблицы по-прежнему готовит Alembic; <code>create_all</code> не вызываем.</p>
+<p><b><code>app/core/lifespan.py</code> — заменить файл</b></p>
+<pre class="language-python" data-file="app/core/lifespan.py" data-mode="replace"><code>import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from pymongo import AsyncMongoClient
+from sqlmodel import Session
+
+from app.core.logging_conf import configure_logging
+from app.db.bootstrap import seed_users
+from app.db.database import create_database_engine
+from app.db.mongodb import ensure_product_attribute_indexes
+
+logger = logging.getLogger(&quot;lifespan&quot;)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = app.state.settings
+    configure_logging()
+    logger.info(&quot;App starting up...&quot;)
+    engine = create_database_engine(settings.database_url)
+    mongo_client = None
+    app.state.engine = engine
+    app.state.mongo_database = None
+    try:
+        if settings.debug:
+            with Session(engine) as db:
+                seed_users(db, settings)
+
+        if settings.mongodb_url is not None:
+            mongo_client = AsyncMongoClient(
+                settings.mongodb_url, tz_aware=True,
+                serverSelectionTimeoutMS=3000,
+            )
+            await mongo_client.admin.command(&quot;ping&quot;)
+            database = mongo_client[settings.mongodb_database]
+            await ensure_product_attribute_indexes(database)
+            app.state.mongo_database = database
+        yield
+    finally:
+        try:
+            if mongo_client is not None:
+                await mongo_client.close()
+        finally:
+            engine.dispose()
+    logger.info(&quot;App shutting down...&quot;)
+</code></pre>
+<p>Один клиент на lifespan: он управляет пулом соединений и работает в одном event loop. Закрываем его через <code>await close()</code>. <code>tz_aware=True</code> сохраняет информацию о часовом поясе.</p>
+<p>Нет URL — приложение стартует без Mongo; составное чтение недоступно. URL задан, но ping или создание индекса не прошли — запуск прерывается. HTTP-обработчики не перехватывают ошибки запуска.</p>
+    <hr>
+
+    <h2>Зависимость для MongoDB</h2>
+<p><b><code>app/dependencies/mongodb.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="app/dependencies/mongodb.py" data-mode="create"><code>from typing import Annotated
+
+from fastapi import Depends, HTTPException
+from pymongo.asynchronous.database import AsyncDatabase
+from starlette.requests import Request
+
+
+def get_mongo_database(request: Request) -&gt; AsyncDatabase:
+    database = request.app.state.mongo_database
+    if database is None:
+        raise HTTPException(status_code=503, detail=&quot;MongoDB не настроена&quot;)
+    return database
+
+
+MongoDatabaseDep = Annotated[AsyncDatabase, Depends(get_mongo_database)]
+</code></pre>
+<p>Используем <code>database is None</code>: проверка <code>if database</code> для Mongo Database не поддерживается.</p>
+    <hr>
+
+    <h2>Проверяем пользователя и товар</h2>
+<p><b><code>app/dependencies/product.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="app/dependencies/product.py" data-mode="create"><code>from typing import Annotated
+
+from fastapi import Depends, Path
+
+from app.dependencies.auth import CurrentUserDep
+from app.dependencies.db import SessionDep
+from app.schemas.product import ProductRead
+from app.services.product import get_product_by_id
+
+
+def require_product(
+    product_id: Annotated[int, Path(ge=1)],
+    db: SessionDep,
+    _user: CurrentUserDep,
+) -&gt; ProductRead:
+    return ProductRead.model_validate(get_product_by_id(product_id, db))
+
+
+ExistingProductDep = Annotated[ProductRead, Depends(require_product)]
+
+
+def require_product_id(product: ExistingProductDep) -&gt; int:
+    return product.id
+
+
+ExistingProductIdDep = Annotated[int, Depends(require_product_id)]
+</code></pre>
+<p><code>CurrentUserDep</code> проверяет вход и блокировку пользователя. Сервис ищет SQL-товар; нет товара — прежний обработчик вернёт 404.</p>
+<p>FastAPI выполняет <code>def</code>-зависимость в пуле потоков. В async-код передаём схему ProductRead без ORM-связей. Для записи нужен только id и роль admin.</p>
+    <hr>
+
+    <h2>Проверяем входные данные</h2>
+<p><b><code>app/schemas/product_attributes.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="app/schemas/product_attributes.py" data-mode="create"><code>from datetime import datetime
+from typing import Annotated
+
+from pydantic import (
+    BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt,
+    StrictStr, field_validator,
+)
+
+from app.schemas.product import ProductRead
+
+AttributeKey = Annotated[
+    str, Field(pattern=r&quot;^[a-z][a-z0-9_]{0,39}$&quot;),
+]
+AttributeValue = StrictStr | StrictInt | StrictFloat | StrictBool
+
+
+class ProductAttributesPut(BaseModel):
+    model_config = ConfigDict(extra=&quot;forbid&quot;, allow_inf_nan=False)
+    attributes: dict[AttributeKey, AttributeValue] = Field(
+        min_length=1, max_length=50,
+    )
+
+    @field_validator(&quot;attributes&quot;)
+    @classmethod
+    def validate_attributes(cls, value):
+        if {&quot;weight_grams&quot;, &quot;color&quot;, &quot;tags&quot;} &amp; value.keys():
+            raise ValueError(&quot;Общие характеристики изменяются через Product.specs&quot;)
+        for item in value.values():
+            if isinstance(item, str) and len(item) &gt; 200:
+                raise ValueError(&quot;Значение характеристики длиннее 200 символов&quot;)
+            if type(item) is int and not -(2**63) &lt;= item &lt; 2**63:
+                raise ValueError(&quot;Целое число не помещается в BSON int64&quot;)
+        return value
+</code></pre>
+<p>Ключи: буква, затем буквы, цифры или <code>_</code>, до 40 символов. Значения: строка до 200 символов, целое BSON int64, конечное число или bool. Strict-типы не превращают строки в числа.</p>
+<p>Принимаем 1–50 ключей за запрос. Запрещены вложенные объекты, списки, null и общие характеристики из <code>Product.specs</code>.</p>
+    <hr>
+
+    <h2>Схемы PATCH и ответа</h2>
+<p><b><code>app/schemas/product_attributes.py</code> — продолжение файла</b></p>
+<pre class="language-python" data-file="app/schemas/product_attributes.py" data-mode="append"><code>class ProductAttributesPatch(ProductAttributesPut):
+    pass
+
+
+class ProductAttributesRead(BaseModel):
+    id: str
+    product_id: int
+    attributes: dict[AttributeKey, AttributeValue]
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProductWithAttributesRead(ProductRead):
+    attributes: dict[AttributeKey, AttributeValue] | None = None
+</code></pre>
+<p>PATCH проверяет вход так же, как PUT. Ответ записи ProductAttributesRead содержит id документа и даты. Обычные GET используют ProductWithAttributesRead: поля товара плюс attributes.</p>
+<p>Лимит 50 — на запрос: несколько PATCH могут накопить больше ключей. Лимит всего документа требует отдельной проверки, поэтому в схеме ответа его нет.</p>
+    <hr>
+
+    <h2>Чтение вместе с товаром</h2>
+<p>Клиент получает товар и характеристики одним HTTP-запросом. API объединяет данные PostgreSQL и MongoDB.</p>
+<table><thead><tr><th>Метод и путь</th><th>Права</th><th>Результат</th></tr></thead><tbody><tr><td>GET /products/{id}</td><td>Активный пользователь</td><td>Товар с attributes — 200; нет товара — 404.</td></tr><tr><td>GET /products</td><td>Активный пользователь</td><td>Список товаров с attributes.</td></tr><tr><td>PUT /products/{id}/attributes</td><td>admin</td><td>Создать или заменить attributes — 200.</td></tr><tr><td>PATCH /products/{id}/attributes</td><td>admin</td><td>Изменить ключи — 200; нет документа — 404.</td></tr><tr><td>DELETE /products/{id}/attributes</td><td>admin</td><td>Удалить документ — 204; нет документа — 404.</td></tr></tbody></table>
+<p>Нет документа — <code>attributes: null</code>. Mongo недоступна — 503. Отдельного GET /attributes нет. Запись характеристик требует существующего SQL-товара.</p>
+<p>PUT сохраняет _id и created_at, обновляет updated_at. PATCH не удаляет ключи через null. SQL-товар эти операции не меняют.</p>
+    <hr>
+
+    <h2>Ответ обычного GET товара</h2>
+<pre class="language-json"><code>{
+  &quot;id&quot;: 42,
+  &quot;name&quot;: &quot;Mechanical Keyboard&quot;,
+  &quot;category&quot;: &quot;electronics&quot;,
+  &quot;price&quot;: 99.9,
+  &quot;description&quot;: null,
+  &quot;is_available&quot;: true,
+  &quot;stock_count&quot;: 5,
+  &quot;specs&quot;: null,
+  &quot;sale_price&quot;: null,
+  &quot;attributes&quot;: {
+    &quot;layout&quot;: &quot;ANSI&quot;,
+    &quot;wireless&quot;: false
+  }
+}
+</code></pre>
+<p>SQL-поля сохраняются. В attributes лежат только расширенные характеристики: клиенту не нужно собирать ответ из двух запросов.</p>
+    <hr>
+
+    <h2>Сервис: ошибки и преобразование BSON</h2>
+<p><b><code>app/services/product_attributes.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="create"><code>from datetime import UTC, datetime
+from typing import Any, Mapping
+
+from pymongo import ReturnDocument
+from pymongo.asynchronous.database import AsyncDatabase
+from pymongo.errors import DuplicateKeyError
+
+from app.schemas.product import ProductRead
+from app.schemas.product_attributes import (
+    ProductAttributesPatch, ProductAttributesPut, ProductAttributesRead,
+    ProductWithAttributesRead,
+)
+
+
+class ProductAttributesNotFoundError(Exception):
+    pass
+
+
+class ProductAttributesConflictError(Exception):
+    pass
+
+
+def attributes_to_read(document: Mapping[str, Any]) -&gt; ProductAttributesRead:
+    payload = dict(document)
+    payload[&quot;id&quot;] = str(payload.pop(&quot;_id&quot;))
+    return ProductAttributesRead.model_validate(payload)
+</code></pre>
+<p>Преобразуем ObjectId в строку и проверяем ответ схемой. Сервис отвечает за данные; HTTP-коды назначают обработчики ошибок.</p>
+    <hr>
+
+    <h2>Сервис: PUT через атомарный upsert</h2>
+<p><b><code>app/services/product_attributes.py</code> — продолжение файла</b></p>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="append"><code>async def put_attributes(
+    product_id: int, payload: ProductAttributesPut, database: AsyncDatabase,
+) -&gt; ProductAttributesRead:
+    now = datetime.now(UTC)
+    collection = database[&quot;product_attributes&quot;]
+    query = {&quot;product_id&quot;: product_id}
+    changes = {
+        &quot;$set&quot;: {&quot;attributes&quot;: payload.attributes, &quot;updated_at&quot;: now},
+        &quot;$setOnInsert&quot;: {&quot;created_at&quot;: now},
+    }
+    try:
+        document = await collection.find_one_and_update(
+            query, changes, upsert=True, return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        # Другой запрос успел первым создать документ с тем же product_id.
+        document = await collection.find_one_and_update(
+            query, changes, upsert=False, return_document=ReturnDocument.AFTER,
+        )
+    if document is None:
+        # Между конфликтом вставки и повтором документ могли удалить.
+        raise ProductAttributesConflictError
+    return attributes_to_read(document)
+</code></pre>
+<ul>
+<li><code>upsert=True</code> создаёт документ при отсутствии; product_id берётся из фильтра.</li>
+<li><code>$setOnInsert</code> задаёт created_at только при создании.</li>
+<li><code>ReturnDocument.AFTER</code> возвращает изменённый документ.</li>
+</ul>
+<p>При конфликте первых PUT повторяем обновление. Если документ успели удалить — 409. При замене одного значения побеждает более поздняя запись; проверки версий здесь нет.</p>
+    <hr>
+
+    <h2>Объединяем товар и характеристики</h2>
+<p><b><code>app/services/product_attributes.py</code> — продолжение файла</b></p>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="append"><code>async def add_attributes(
+    products: list[ProductRead], database: AsyncDatabase,
+) -&gt; list[ProductWithAttributesRead]:
+    if not products:
+        return []
+    cursor = database[&quot;product_attributes&quot;].find(
+        {&quot;product_id&quot;: {&quot;$in&quot;: [product.id for product in products]}},
+        {&quot;_id&quot;: 0, &quot;product_id&quot;: 1, &quot;attributes&quot;: 1},
+    )
+    by_id = {
+        document[&quot;product_id&quot;]: document[&quot;attributes&quot;]
+        async for document in cursor
+    }
+    return [
+        ProductWithAttributesRead(
+            **product.model_dump(), attributes=by_id.get(product.id),
+        )
+        for product in products
+    ]
+</code></pre>
+<p>Одна выборка <code>$in</code> получает характеристики всех товаров. <code>find()</code> возвращает курсор без await; читаем его через <code>async for</code>. Порядок SQL-товаров сохраняется.</p>
+<p>Функция подходит и для одного товара. Не делаем отдельный Mongo-запрос на каждый элемент списка — это проблема N+1.</p>
+    <hr>
+
+    <h2>Обычный GET товара</h2>
+<p><b><code>app/routers/product.py</code> — дополнить импорты</b></p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="add-imports"><code>from fastapi import Depends
+
+from app.dependencies.mongodb import MongoDatabaseDep
+from app.dependencies.product import ExistingProductDep
+from app.schemas.product_attributes import ProductWithAttributesRead
+from app.services.product_attributes import add_attributes
+</code></pre>
+<p>Заменяем существующий get_product вместе с декоратором:</p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="replace-function" data-function="get_product"><code>@router.get(&quot;/{product_id}&quot;, response_model=ProductWithAttributesRead)
+async def get_product(
+    product: ExistingProductDep, database: MongoDatabaseDep,
+) -&gt; ProductWithAttributesRead:
+    products = await add_attributes([product], database)
+    return products[0]
+</code></pre>
+<p>Зависимость уже проверила токен и SQL-товар. Сервис добавляет характеристики из MongoDB.</p>
+    <hr>
+
+    <h2>Обычный GET списка</h2>
+<p><b><code>app/routers/product.py</code> — заменить list_products вместе с декоратором следующим блоком. Существующие SearchParam, LimitParam и CategoryParam сохраняем.</b></p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="replace-function" data-function="list_products"><code>def load_product_list(
+    db: SessionDep,
+    user: CurrentUserDep,
+    search: SearchParam = None,
+    limit: LimitParam = 10,
+    category: CategoryParam = None,
+    only_available: bool = True,
+) -&gt; list[ProductRead]:
+    products = get_products(search, limit, category, only_available, db)
+    return [ProductRead.model_validate(product) for product in products]
+
+
+ProductListDep = Annotated[list[ProductRead], Depends(load_product_list)]
+
+
+@router.get(&quot;&quot;, response_model=list[ProductWithAttributesRead])
+async def list_products(
+    products: ProductListDep, database: MongoDatabaseDep,
+) -&gt; list[ProductWithAttributesRead]:
+    return await add_attributes(products, database)
+</code></pre>
+<p>SQL-выборка выполняется в def-зависимости, Mongo-выборка — асинхронно. Поиск, фильтры и limit сохраняются. Пустой список не требует запроса к MongoDB.</p>
+    <hr>
+
+    <h2>Сервис: частичное обновление</h2>
+<p><b><code>app/services/product_attributes.py</code> — продолжение файла</b></p>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="append"><code>async def patch_attributes(
+    product_id: int, payload: ProductAttributesPatch, database: AsyncDatabase,
+) -&gt; ProductAttributesRead:
+    changes = {
+        f&quot;attributes.{key}&quot;: value
+        for key, value in payload.attributes.items()
+    }
+    changes[&quot;updated_at&quot;] = datetime.now(UTC)
+    document = await database[&quot;product_attributes&quot;].find_one_and_update(
+        {&quot;product_id&quot;: product_id}, {&quot;$set&quot;: changes},
+        return_document=ReturnDocument.AFTER,
+    )
+    if document is None:
+        raise ProductAttributesNotFoundError
+    return attributes_to_read(document)
+</code></pre>
+<p><b>PUT:</b> <code>$set: {"attributes": ...}</code> заменяет объект целиком. <b>PATCH:</b> <code>$set: {"attributes.wireless": true}</code> меняет один ключ.</p>
+<p>Изменяем пути без чтения и перезаписи всего объекта: параллельные PATCH разных ключей не затирают друг друга. Без upsert отсутствующий документ даёт 404.</p>
+    <hr>
+
+    <h2>Сервис: удаление документа</h2>
+<p><b><code>app/services/product_attributes.py</code> — продолжение файла</b></p>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="append"><code>async def delete_attributes(product_id: int, database: AsyncDatabase) -&gt; None:
+    result = await database[&quot;product_attributes&quot;].delete_one(
+        {&quot;product_id&quot;: product_id},
+    )
+    if result.deleted_count == 0:
+        raise ProductAttributesNotFoundError
+</code></pre>
+<p>Проверяем <code>deleted_count</code>: 0 — документа нет, вернём 404. Товар и его SQL-поле specs сохраняются.</p>
+    <hr>
+
+    <h2>Router характеристик: PUT</h2>
+<p><b><code>app/routers/product_attributes.py</code> — новый файл</b></p>
+<pre class="language-python" data-file="app/routers/product_attributes.py" data-mode="create"><code>from fastapi import APIRouter
+
+from app.dependencies.auth import AdminUserDep
+from app.dependencies.mongodb import MongoDatabaseDep
+from app.dependencies.product import ExistingProductIdDep
+from app.schemas.product_attributes import (
+    ProductAttributesPatch, ProductAttributesPut, ProductAttributesRead,
+)
+from app.services.product_attributes import (
+    delete_attributes, patch_attributes, put_attributes,
+)
+
+router = APIRouter(prefix=&quot;/products&quot;, tags=[&quot;Product attributes&quot;])
+
+
+@router.put(&quot;/{product_id}/attributes&quot;, response_model=ProductAttributesRead)
+async def replace_product_attributes(
+    payload: ProductAttributesPut,
+    _admin: AdminUserDep,
+    product_id: ExistingProductIdDep,
+    database: MongoDatabaseDep,
+) -&gt; ProductAttributesRead:
+    return await put_attributes(product_id, payload, database)
+</code></pre>
+<p><code>ExistingProductIdDep</code> проверяет пользователя и SQL-товар. Для записи дополнительно нужен <code>AdminUserDep</code>. Сервис вызываем через await.</p>
+    <hr>
+
+    <h2>Router характеристик: PATCH и DELETE</h2>
+<p><b><code>app/routers/product_attributes.py</code> — продолжение файла</b></p>
+<pre class="language-python" data-file="app/routers/product_attributes.py" data-mode="append"><code>@router.patch(&quot;/{product_id}/attributes&quot;, response_model=ProductAttributesRead)
+async def update_product_attributes(
+    payload: ProductAttributesPatch,
+    _admin: AdminUserDep,
+    product_id: ExistingProductIdDep,
+    database: MongoDatabaseDep,
+) -&gt; ProductAttributesRead:
+    return await patch_attributes(product_id, payload, database)
+
+
+@router.delete(&quot;/{product_id}/attributes&quot;, status_code=204)
+async def remove_product_attributes(
+    _admin: AdminUserDep,
+    product_id: ExistingProductIdDep,
+    database: MongoDatabaseDep,
+) -&gt; None:
+    await delete_attributes(product_id, database)
+</code></pre>
+<p>DELETE возвращает 204 без тела. Все операции используют прежние JWT и роли; отдельного входа для Mongo API нет.</p>
+    <hr>
+
+<h2>Подключаем router</h2>
+
+<p>В <code>app/main.py</code> дополняем импорты; прежние обработчики ошибок сохраняем.</p>
+<p><b><code>app/main.py</code> — дополнить импорты</b></p>
+<pre class="language-python" data-file="app/main.py" data-mode="add-imports"><code>from pymongo.errors import ConnectionFailure
+
+from app.routers import product_attributes
+from app.services.product_attributes import (
+    ProductAttributesConflictError, ProductAttributesNotFoundError,
+)
+</code></pre>
+<p>Внутри <code>create_app</code> перед return:</p>
+<pre class="language-python" data-file="app/main.py" data-mode="add-inside-create-app"><code>application.include_router(product_attributes.router)
+</code></pre>
+    <hr>
+
+<h2>Ошибки: 404, 409, 503</h2>
+<p><b><code>app/main.py</code> — добавить внутри create_app до return</b></p>
+<pre class="language-python" data-file="app/main.py" data-mode="add-inside-create-app"><code>@application.exception_handler(ProductAttributesNotFoundError)
+async def attributes_not_found(request, exc):
+    return JSONResponse(
+        status_code=404, content={&quot;detail&quot;: &quot;Характеристики товара не найдены&quot;},
+    )
+
+
+@application.exception_handler(ProductAttributesConflictError)
+async def attributes_conflict(request, exc):
+    return JSONResponse(
+        status_code=409, content={&quot;detail&quot;: &quot;Повторите изменение характеристик&quot;},
+    )
+
+
+@application.exception_handler(ConnectionFailure)
+async def mongo_unavailable(request, exc):
+    return JSONResponse(
+        status_code=503, content={&quot;detail&quot;: &quot;MongoDB временно недоступна&quot;},
+    )
+</code></pre>
+<p><code>ConnectionFailure</code> переводит ошибки соединения во время запроса в 503. Ошибки кода и структуры документов этим обработчиком не скрываем.</p>
+    <hr>
+
+    <h2>Ручная проверка через Swagger</h2>
+
+<ol>
+<li>Запустите обе базы с <code>--wait</code>, примените <code>uv run alembic upgrade head</code> и запустите <code>uv run uvicorn app.main:app --reload</code>.</li>
+<li>Войдите через <code>POST /auth/obtain_token</code> как admin, нажмите Authorize. В debug-профиле admin создаётся автоматически.</li>
+<li>Создайте товар через POST /products. Используйте id из ответа.</li>
+<li>GET /products/{id}: сначала attributes=null. PUT /products/{id}/attributes добавит характеристики; повторный GET товара вернёт их.</li>
+<li>Проверьте PATCH характеристик → GET товара → DELETE характеристик → GET товара с attributes=null. GET /products тоже включает attributes.</li>
+<li>Как user: GET товаров разрешён, запись характеристик — 403. Без токена — 401.</li>
+</ol>
+<pre class="language-json"><code>{
+  &quot;attributes&quot;: {
+    &quot;layout&quot;: &quot;ANSI&quot;,
+    &quot;switch&quot;: &quot;brown&quot;,
+    &quot;wireless&quot;: false
+  }
+}
+</code></pre>
+<p>PATCH <code>{"attributes": {"wireless": true}}</code> сохранит layout и switch. PUT только с layout удалит остальные ключи. Результат проверяйте обычным GET товара.</p>
+    <hr>
+
+<h2>Атомарность: один документ</h2>
+<p><code>find_one_and_update</code> атомарно меняет один документ. Для нашего CRUD этого достаточно.</p>
+<p>Транзакции нескольких Mongo-документов требуют replica set или sharded cluster. Одиночный контейнер из лекции их не предоставляет.</p>
+<p>Общей транзакции PostgreSQL + MongoDB нет. Откат SQL не отменяет запись в MongoDB.</p>
+    <hr>
+
+<h2>Если SQL-товар удалили</h2>
+<pre class="language-text"><code>Запрос A: проверил SQL-товар — существует
+Запрос B: удалил SQL-товар
+Запрос A: записал Mongo-документ — ссылка осталась без товара
+</code></pre>
+<p>Проверка API не исключает гонку. Mongo-документ не удалится автоматически; Alembic этим не управляет.</p>
+<p>На практике сначала удаляем attributes, затем товар. При сбое это не даёт атомарной гарантии.</p>
+<details>
+<summary>Для рабочего проекта: события и идентификаторы</summary>
+<p>Один из вариантов — SQL outbox: событие удаления записывается в одной транзакции с удалением товара, обработчик повторяемо очищает MongoDB. Брокера без надёжной записи события недостаточно.</p>
+<p>Обычный SQL DELETE не сбрасывает sequence; после переноса мы выставили её за максимальный id. Но сброс sequence, <code>TRUNCATE RESTART IDENTITY</code> или восстановление только одной базы могут повторно использовать id. Нужны очистка старых документов и стабильная идентичность, например UUID; сам UUID не решает удаление.</p>
+<p>Служебные id нельзя менять через JSON. В текущем <code>ProductCreate</code> стоит <code>extra="allow"</code>: перед рабочим использованием запретите служебные поля или ограничьте поля, переносимые в ORM.</p>
+</details>
+    <hr>
+
+    <h2>Поведение при отключённой MongoDB</h2>
+
+<table><thead><tr><th>Ситуация</th><th>Ожидаемое поведение</th></tr></thead><tbody>
+<tr><td>mongodb_url=None</td><td>Составные GET товара и списка требуют Mongo — 503. SQL-запись и /health работают. Без токена — 401; нет SQL-товара — 404.</td></tr>
+<tr><td>URL задан, Mongo недоступна при старте</td><td>Запуск прерывается после ожидания; ресурсы закрываются.</td></tr>
+<tr><td>Mongo пропала во время запроса</td><td>Ошибка соединения при чтении или записи характеристик → 503. Ошибку не подменяем attributes=null.</td></tr>
+</tbody></table>
+<p>Объединённый GET зависит от двух баз. <code>null</code> означает отсутствие документа, а не отказ MongoDB. <code>/health</code> проверяет только SQL; для обеих баз нужна readiness-проверка.</p>
+
+    <hr>
+
+<h2>Практика и результат</h2>
+
+<ol>
+<li>Добавьте mongo в существующий compose.yaml, сохранив PostgreSQL и его том. Поднимите оба сервера с --wait.</li>
+<li>Сохраните PostgreSQL DATABASE_URL, добавьте два Mongo-поля Settings и unique index по product_id.</li>
+<li>Подключите AsyncMongoClient в существующий lifespan, сохранив SQL Engine, seed_users и очистку ресурсов.</li>
+<li>Создайте схемы, зависимости, сервис, router и обработчики ошибок по блокам выше.</li>
+<li>Проверьте PUT/PATCH/DELETE характеристик и их чтение обычными GET товара и списка. Проверьте валидацию и права user/admin.</li>
+<li>Проверьте отсутствие документа (null), отключённую Mongo (503) и SQL /health.</li>
+</ol>
+<p>В тестовой фикстуре client задайте Mongo URL и отдельную Mongo-базу на каждый тест; после теста удаляйте эту базу. Сравнения GET после L8 дополните <code>attributes: None</code>, если документа нет. SQL-запись возвращает прежний ProductRead.</p>
+<p>Дополнительно: добавьте удаление одного ключа через $unset, проверку одновременных первых PUT и сценарий удаления SQL-товара. Объясните, почему SQL rollback не отменяет уже выполненную запись MongoDB.</p>
+<p>После L9 товар читается одним HTTP-запросом вместе с характеристиками. PostgreSQL хранит основные данные, MongoDB — attributes; отдельные PUT/PATCH/DELETE меняют только характеристики. JWT и роли остаются прежними.</p>
+
+    <hr>
+
+    <h2>Официальные материалы</h2>
+
+<ul>
+<li><a href="https://www.mongodb.com/docs/languages/python/pymongo-driver/current/reference/migration/">PyMongo Async: await, cursor и ограничение одного event loop</a>.</li>
+<li><a href="https://www.mongodb.com/docs/languages/python/pymongo-driver/current/crud/">PyMongo: CRUD с асинхронными примерами</a>.</li>
+<li><a href="https://pymongo.readthedocs.io/en/stable/api/pymongo/asynchronous/collection.html">AsyncCollection: find_one_and_update и ReturnDocument</a>.</li>
+<li><a href="https://www.mongodb.com/docs/manual/core/index-unique/">Уникальные индексы MongoDB</a>.</li>
+<li><a href="https://www.mongodb.com/docs/manual/reference/operator/update/set/">Оператор $set и вложенные пути</a>.</li>
+<li><a href="https://www.mongodb.com/docs/manual/core/write-operations-atomicity/">Атомарность операций MongoDB</a>.</li>
+</ul>
+
+    <hr>
+
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>

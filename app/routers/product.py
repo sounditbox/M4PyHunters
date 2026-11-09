@@ -1,15 +1,19 @@
 from typing import Annotated
 
-from fastapi import Path, Query, APIRouter
+from fastapi import Depends, Path, Query, APIRouter
 from starlette import status
 
 from app.dependencies.auth import CurrentUserDep, AdminUserDep
 from app.dependencies.db import SessionDep
+from app.dependencies.mongodb import MongoDatabaseDep
+from app.dependencies.product import ExistingProductDep
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
+from app.schemas.product_attributes import ProductWithAttributesRead
 from app.services.product import (
-    get_product_by_id, get_products, create,
+    get_products, create,
     replace, update, delete
 )
+from app.services.product_attributes import add_attributes
 
 ProductId = Annotated[int, Path(ge=1, description="ID товара")]
 
@@ -28,26 +32,34 @@ CategoryParam = Annotated[
 router = APIRouter(prefix='/products', tags=['Products'])
 
 
-@router.get("/{product_id}", response_model=ProductRead,
-            description='Получение товара по ID')
-async def get_product(product_id: ProductId, db: SessionDep,
-                      user: CurrentUserDep) -> ProductRead:
-    return get_product_by_id(product_id, db)
+@router.get("/{product_id}", response_model=ProductWithAttributesRead)
+async def get_product(
+    product: ExistingProductDep, database: MongoDatabaseDep,
+) -> ProductWithAttributesRead:
+    products = await add_attributes([product], database)
+    return products[0]
 
 
-@router.get("", response_model=list[ProductRead],
-            description='Получение списка товаров')
-async def list_products(
-        db: SessionDep,
-        user: CurrentUserDep,
-        search: SearchParam = None,
-        limit: LimitParam = 10,
-        category: CategoryParam = None,
-        only_available: bool = True,
+def load_product_list(
+    db: SessionDep,
+    user: CurrentUserDep,
+    search: SearchParam = None,
+    limit: LimitParam = 10,
+    category: CategoryParam = None,
+    only_available: bool = True,
 ) -> list[ProductRead]:
-    return get_products(
-        search, limit, category, only_available, db
-    )
+    products = get_products(search, limit, category, only_available, db)
+    return [ProductRead.model_validate(product) for product in products]
+
+
+ProductListDep = Annotated[list[ProductRead], Depends(load_product_list)]
+
+
+@router.get("", response_model=list[ProductWithAttributesRead])
+async def list_products(
+    products: ProductListDep, database: MongoDatabaseDep,
+) -> list[ProductWithAttributesRead]:
+    return await add_attributes(products, database)
 
 
 @router.post("", response_model=ProductRead,

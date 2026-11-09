@@ -60,7 +60,18 @@ def database_url(tmp_path):
 
 
 @pytest.fixture
-def client(database_url, migrate_database):
+def mongo_settings():
+    return {
+        "mongodb_url": os.getenv(
+            "TEST_MONGODB_URL",
+            "mongodb://mongo:mongo@127.0.0.1:27017/?authSource=admin",
+        ),
+        "mongodb_database": f"test_{uuid4().hex}",
+    }
+
+
+@pytest.fixture
+def client(database_url, migrate_database, mongo_settings):
     migrate_database(database_url)
     settings = Settings(
         _env_file=None,
@@ -69,6 +80,7 @@ def client(database_url, migrate_database):
         secret_key="test-" + "x" * 64,
         admin_password="admin-pass",
         user_password="user-pass",
+        **mongo_settings,
     )
     with TestClient(create_app(settings)) as test_client:
         with Session(test_client.app.state.engine) as db:
@@ -78,7 +90,11 @@ def client(database_url, migrate_database):
                 for index in range(1, 6)
             ])
             db.commit()
-        yield test_client
+        database = test_client.app.state.mongo_database
+        try:
+            yield test_client
+        finally:
+            test_client.portal.call(database.client.drop_database, database.name)
 
 
 @pytest.fixture

@@ -31,7 +31,7 @@ def test_create_product(client, admin_headers):
 
     saved = client.get(f"/products/{body['id']}", headers=admin_headers)
     assert saved.status_code == 200
-    assert saved.json() == body
+    assert saved.json() == body | {"attributes": None}
 
 
 def test_update_product(client, admin_headers):
@@ -67,7 +67,7 @@ def test_replace_product(client, admin_headers):
 
     saved = client.get("/products/1", headers=admin_headers)
     assert saved.status_code == 200
-    assert saved.json() == replacement | {"id": 1}
+    assert saved.json() == replacement | {"id": 1, "attributes": None}
 
 
 def test_delete_product(client, admin_headers):

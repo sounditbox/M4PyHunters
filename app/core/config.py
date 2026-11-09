@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     user_password: SecretStr = Field(min_length=8)
     database_url: str = "postgresql+psycopg://products:products@127.0.0.1:5432/products"
 
+    mongodb_url: str | None = None
+    mongodb_database: str = "products"
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8",
     )
