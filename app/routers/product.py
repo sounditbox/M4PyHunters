@@ -3,10 +3,12 @@ from typing import Annotated
 from fastapi import Depends, Path, Query, APIRouter
 from starlette import status
 
+from app.dependencies._redis import RedisDep
 from app.dependencies.auth import CurrentUserDep, AdminUserDep
 from app.dependencies.db import SessionDep
 from app.dependencies.mongodb import MongoDatabaseDep
 from app.dependencies.product import ExistingProductDep
+from app.dependencies.settings import SettingsDep
 from app.schemas.product import ProductRead, ProductCreate, ProductUpdate
 from app.schemas.product_attributes import ProductWithAttributesRead
 from app.services.product import (
@@ -34,19 +36,20 @@ router = APIRouter(prefix='/products', tags=['Products'])
 
 @router.get("/{product_id}", response_model=ProductWithAttributesRead)
 async def get_product(
-    product: ExistingProductDep, database: MongoDatabaseDep,
+        product: ExistingProductDep, database: MongoDatabaseDep,
+        redis: RedisDep, settings: SettingsDep,
 ) -> ProductWithAttributesRead:
-    products = await add_attributes([product], database)
+    products = await add_attributes([product], database, redis, settings)
     return products[0]
 
 
 def load_product_list(
-    db: SessionDep,
-    user: CurrentUserDep,
-    search: SearchParam = None,
-    limit: LimitParam = 10,
-    category: CategoryParam = None,
-    only_available: bool = True,
+        db: SessionDep,
+        user: CurrentUserDep,
+        search: SearchParam = None,
+        limit: LimitParam = 10,
+        category: CategoryParam = None,
+        only_available: bool = True,
 ) -> list[ProductRead]:
     products = get_products(search, limit, category, only_available, db)
     return [ProductRead.model_validate(product) for product in products]
@@ -57,9 +60,10 @@ ProductListDep = Annotated[list[ProductRead], Depends(load_product_list)]
 
 @router.get("", response_model=list[ProductWithAttributesRead])
 async def list_products(
-    products: ProductListDep, database: MongoDatabaseDep,
+        products: ProductListDep, database: MongoDatabaseDep,
+        redis: RedisDep, settings: SettingsDep,
 ) -> list[ProductWithAttributesRead]:
-    return await add_attributes(products, database)
+    return await add_attributes(products, database, redis, settings)
 
 
 @router.post("", response_model=ProductRead,

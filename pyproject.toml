@@ -13,6 +13,7 @@ dependencies = [
     "pyjwt>=2.15.1",
     "pymongo>=4.19.0",
     "python-multipart>=0.0.32",
+    "redis>=8.1.0",
     "sqlalchemy[asyncio]>=2.1.6",
     "sqlmodel>=0.0.48",
     "uvicorn>=0.54.0",

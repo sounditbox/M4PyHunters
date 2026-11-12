@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     mongodb_url: str | None = None
     mongodb_database: str = "products"
 
+    redis_url: str | None = None
+    attributes_cache_ttl_seconds: int = Field(default=30, gt=0)
+    auth_rate_limit_per_minute: int = Field(default=5, gt=0)
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8",
     )

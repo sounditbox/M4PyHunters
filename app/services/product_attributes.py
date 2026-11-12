@@ -4,12 +4,16 @@ from typing import Any, Mapping
 from pymongo import ReturnDocument
 from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.errors import DuplicateKeyError
+from redis.asyncio import Redis
 
+from app.core.config import Settings
 from app.schemas.product import ProductRead
 from app.schemas.product_attributes import (
     ProductAttributesPatch, ProductAttributesPut, ProductAttributesRead,
     ProductWithAttributesRead,
 )
+from app.services.attribute_cache import read_cached_attributes, \
+    CachedAttributes, write_cached_attributes
 
 
 class ProductAttributesNotFoundError(Exception):
@@ -53,17 +57,26 @@ async def put_attributes(
 
 async def add_attributes(
     products: list[ProductRead], database: AsyncDatabase,
+    redis: Redis | None, settings: Settings,
 ) -> list[ProductWithAttributesRead]:
     if not products:
         return []
-    cursor = database["product_attributes"].find(
-        {"product_id": {"$in": [product.id for product in products]}},
-        {"_id": 0, "product_id": 1, "attributes": 1},
-    )
-    by_id = {
-        document["product_id"]: document["attributes"]
-        async for document in cursor
-    }
+    ids = [product.id for product in products]
+    by_id = await read_cached_attributes(redis, ids)
+    missing = [product_id for product_id in ids if product_id not in by_id]
+
+    if missing:
+        fresh = {}
+        cursor = database["product_attributes"].find(
+            {"product_id": {"$in": missing}},
+            {"_id": 0, "product_id": 1, "attributes": 1},
+        )
+        async for document in cursor:
+            value = CachedAttributes(attributes=document["attributes"])
+            fresh[document["product_id"]] = value.attributes
+        by_id.update(fresh)
+        await write_cached_attributes(redis, fresh, settings.attributes_cache_ttl_seconds)
+
     return [
         ProductWithAttributesRead(
             **product.model_dump(), attributes=by_id.get(product.id),

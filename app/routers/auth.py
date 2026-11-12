@@ -6,6 +6,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from app.core.security import create_access_token
 from app.dependencies.auth import invalid_credentials, CurrentUserDep
 from app.dependencies.db import SessionDep
+from app.dependencies.rate_limit import LoginRateLimitDep
 from app.dependencies.settings import SettingsDep
 from app.schemas.auth import Token, UserRead
 from app.services.auth import authenticate_user
@@ -15,7 +16,8 @@ LoginForm = Annotated[OAuth2PasswordRequestForm, Depends()]
 
 
 @router.post("/obtain_token", response_model=Token)
-def login(form: LoginForm, db: SessionDep, settings: SettingsDep) -> Token:
+def login(form: LoginForm, db: SessionDep, settings: SettingsDep,
+          _limit: LoginRateLimitDep,) -> Token:
     user = authenticate_user(db, form.username, form.password)
     if user is None:
         raise invalid_credentials()

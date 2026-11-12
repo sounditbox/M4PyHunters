@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="ru" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link href="https://super-dev-styles.github.io/website-assets/styles.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/view.css" rel="stylesheet">
+  <link href="https://super-dev-styles.github.io/website-assets/slides.css" rel="stylesheet">
+  <script src="https://super-dev-styles.github.io/website-assets/slides.js" defer></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.css" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/line-numbers/prism-line-numbers.min.js"></script>
+  <title>Лекция 10: Redis — кэш характеристик и лимит входа</title>
+</head>
+<body>
+<div class="content lecture-content post-content">
+  <db-content>
+    <h1>Лекция 10: Redis — кэш характеристик и лимит входа</h1>
+    <p>Познакомимся с Redis: разберём хранение данных в памяти, модель «ключ — значение», основные типы данных и время жизни ключей. Затем подключим его к Products API для кэша характеристик товара и счётчика попыток входа.</p>
+    <p>Примеры адаптированы к текущему приложению: <code>app/routers/product.py</code>, <code>app/services/product_attributes.py</code>, <code>POST /auth/obtain_token</code>, прежние JWT и роли. Здесь приведены изменения для последовательной реализации; текущий код приложения эта лекция сама не меняет.</p>
+    <hr>
+    <h2>Что такое Redis</h2>
+<p><b>Redis — серверное хранилище данных, которое работает с данными в оперативной памяти и предоставляет команды для их чтения и изменения.</b> Название раскрывается как Remote Dictionary Server — «удалённый сервер словарей».</p>
+<p>Базовая модель — <b>ключ и связанное с ним значение</b>. Приложение знает имя ключа, например <code>products:attributes:42</code>, и запрашивает его значение. При этом Redis поддерживает не только строки, но и структуры данных: словари полей, списки, множества и другие.</p>
+<p>Redis используют для кэша, временных состояний, счётчиков и обмена сообщениями. Роль зависит от приложения: в нашей лекции он хранит копии характеристик и счётчики входа. Основные данные товаров продолжают храниться в PostgreSQL и MongoDB.</p>
+<p>Введение: <a href="https://redis.io/docs/latest/get-started/">Redis Open Source</a>, <a href="https://redis.io/docs/latest/develop/get-started/data-store/">модель данных и первые команды</a>.</p>
+    <hr>
+
+    <h2>Redis и обычный Python-словарь</h2>
+<p>Python-словарь <code>dict</code> находится в памяти процесса приложения. Если запустить несколько процессов FastAPI, у каждого будет свой словарь. Значение, записанное одним процессом, само по себе не появится в остальных.</p>
+<p>Redis запускается отдельным сервером. Все экземпляры API могут подключаться к нему по сети и работать с общими ключами. Python-библиотека redis-py — клиент этого сервера; redis-cli — клиент для работы из терминала.</p>
+<pre class="language-text"><code>FastAPI, процесс 1 ──┐
+                    ├── сеть ── Redis Server ── ключи и значения в RAM
+FastAPI, процесс 2 ──┘
+
+redis-py  — клиент внутри Python-приложения
+redis-cli — клиент в терминале
+</code></pre>
+<p>Поэтому общий счётчик попыток входа можно вынести в Redis. Но сетевой вызов отличается от обращения к локальному dict: у него есть задержка, соединение может оборваться, а сервер — стать недоступным.</p>
+    <hr>
+
+    <h2>Основные типы данных Redis</h2>
+<table>
+<thead><tr><th>Тип</th><th>Что хранит</th><th>Пример задачи</th><th>Команды</th></tr></thead>
+<tbody>
+<tr><td><b>String</b></td><td>Последовательность байтов: текст, JSON, двоичные данные или числовое значение счётчика.</td><td>Кэш attributes, число попыток входа.</td><td>SET, GET, INCR</td></tr>
+<tr><td><b>Hash</b></td><td>Набор полей и значений внутри одного ключа.</td><td>Небольшой профиль с отдельным доступом к полям.</td><td>HSET, HGET, HGETALL</td></tr>
+<tr><td><b>List</b></td><td>Упорядоченную последовательность строк; повторы разрешены.</td><td>Простой буфер элементов с добавлением и извлечением с концов.</td><td>LPUSH, RPOP, LRANGE</td></tr>
+<tr><td><b>Set</b></td><td>Неупорядоченное множество уникальных строк.</td><td>Уникальные id, проверка принадлежности к группе.</td><td>SADD, SISMEMBER, SMEMBERS</td></tr>
+<tr><td><b>Sorted Set</b></td><td>Уникальные элементы с числовой оценкой — score, по которой они упорядочены.</td><td>Рейтинг товаров по популярности.</td><td>ZADD, ZRANGE</td></tr>
+<tr><td><b>Stream</b></td><td>Последовательность записей с id и набором полей.</td><td>Поток событий и чтение группой обработчиков.</td><td>XADD, XREAD, XREADGROUP</td></tr>
+</tbody>
+</table>
+<p>Тип выбирают по нужным операциям. В этой практике достаточно String: JSON характеристик сериализуем в строку, а счётчик изменяем через INCR. Redis не разбирает поля JSON, сохранённого обычной командой SET.</p>
+<p>Hash Redis и Python dict похожи по назначению, но не идентичны: значения полей Redis Hash не становятся автоматически вложенными Python-объектами.</p>
+<p>Справка: <a href="https://redis.io/docs/latest/develop/data-types/compare-data-types/">сравнение типов Redis</a>, <a href="https://redis.io/docs/latest/develop/data-types/strings/">Redis Strings</a>.</p>
+    <hr>
+
+    <h2>Память, скорость и кэширование</h2>
+<p>Redis обслуживает операции над данными в оперативной памяти. Доступ по известному ключу и готовые операции над структурами данных делают его удобным для частых коротких запросов.</p>
+<p><b>Кэширование</b> — сохранение копии результата, чтобы использовать её повторно. Например, API один раз читает характеристики из MongoDB, а следующие запросы некоторое время получают их копию из Redis. Когда копия исчезнет, её можно создать заново из источника.</p>
+<p>Цена такого решения — дополнительная память, сетевые обращения и возможность устаревания копии. PostgreSQL и MongoDB тоже используют память для ускорения работы; установка Redis сама по себе не гарантирует более быстрый ответ.</p>
+<p>Объём памяти Redis конечен. При настройке <code>maxmemory</code> поведение определяет политика вытеснения: сервер может удалять подходящие ключи или отклонять записи, требующие дополнительной памяти. Поэтому отсутствие ключа — штатная ситуация для кэша.</p>
+<p>Подробнее: <a href="https://redis.io/docs/latest/reference/eviction/">ограничение памяти и вытеснение ключей</a>.</p>
+    <hr>
+
+    <h2>TTL: время жизни ключа</h2>
+<p><b>TTL, Time To Live</b> — оставшееся время жизни ключа. Можно сохранить значение на 30 секунд: после истечения срока ключ считается отсутствующим, и приложение должно быть готово прочитать исходные данные снова.</p>
+<pre class="language-text"><code>Сохранили копию attributes с TTL 30 секунд
+               ↓
+Пока срок не истёк → GET может использовать копию
+               ↓
+Срок истёк → копии нет → читаем MongoDB и заполняем кэш снова
+</code></pre>
+<p>Срок задают явно: например, <code>SET key value EX 30</code>. Без срока ключ может сохраняться до удаления, перезаписи или вытеснения. TTL автоматически не отслеживает изменения товара в MongoDB: он лишь ограничивает жизнь конкретной копии.</p>
+<p><b>Инвалидация</b> — удаление или признание копии устаревшей после изменения источника. В нашем приложении после записи новых характеристик удалим их Redis-ключ, чтобы следующий GET прочитал MongoDB. Позже разберём, почему даже TTL вместе с удалением не устраняет все гонки.</p>
+<p>Справка: <a href="https://redis.io/docs/latest/commands/expire/">срок действия ключа</a>.</p>
+    <hr>
+
+    <h2>Атомарные команды и счётчики</h2>
+<p>Redis предоставляет команды, которые выполняют изменение на стороне сервера. Например, <code>INCR</code> атомарно увеличивает целое значение на единицу: параллельные клиенты не теряют увеличения из-за одновременного чтения старого значения.</p>
+<pre class="language-text"><code>Схема GET → вычислить в Python → SET:
+клиент A прочитал 3 → записал 4
+клиент B прочитал 3 → записал 4
+Итог: 4, хотя увеличений было два
+
+Два вызова INCR на сервере:
+3 → 4 → 5
+Итог: 5
+</code></pre>
+<p>Но несколько отдельных команд не становятся одной атомарной операцией автоматически. Например, между INCR и назначением TTL может оборваться соединение. Для счётчика вместе с TTL используем транзакцию Redis.</p>
+<p>Атомарность внутри Redis не объединяет его запись с транзакцией PostgreSQL или изменением MongoDB.</p>
+<p>Подробнее: <a href="https://redis.io/docs/latest/commands/incr/">INCR и счётчики</a>.</p>
+    <hr>
+
+    <h2>Сохранение данных Redis на диск</h2>
+<p>Работа с данными в памяти не означает, что Redis вообще не умеет сохранять их на диск. Для восстановления после перезапуска можно настроить persistence.</p>
+<table>
+<thead><tr><th>Механизм</th><th>Как работает</th><th>Что учитывать</th></tr></thead>
+<tbody>
+<tr><td><b>RDB</b></td><td>Сохраняет снимок состояния данных на определённый момент.</td><td>Изменения после последнего пригодного снимка могут быть потеряны при аварии.</td></tr>
+<tr><td><b>AOF</b></td><td>Записывает изменения в журнал, из которого можно восстановить данные.</td><td>Гарантии зависят от настройки записи и синхронизации журнала; сохранение имеет свою стоимость.</td></tr>
+<tr><td><b>Без persistence</b></td><td>Данные остаются только в памяти запущенного сервера.</td><td>После перезапуска кэш и временные счётчики будут пустыми.</td></tr>
+</tbody>
+</table>
+<p>В учебном Compose ниже отключим RDB и AOF: характеристики восстановим из MongoDB, а счётчики входа начнут новое окно. Это выбранная политика нашего приложения, а не обязательное свойство любого Redis.</p>
+<p>Если Redis хранит данные, потеря которых недопустима, требования к сохранению и восстановлению нужно определить отдельно.</p>
+<p>Справка: <a href="https://redis.io/docs/latest/management/persistence/">RDB и AOF</a>.</p>
+    <hr>
+
+    <h2>Применение Redis в приложении</h2>
+<table><thead><tr><th>Сценарий</th><th>Решение для этого проекта</th></tr></thead><tbody><tr><td>Кэш расширенных характеристик</td><td>Основная практика: уменьшаем повторные чтения MongoDB в GET товара и списка.</td></tr><tr><td>Лимит попыток входа</td><td>Вторая практика: общий для экземпляров API счётчик по IP с коротким TTL.</td></tr><tr><td>Кэш всего ответа товара</td><td>Возможное продолжение: потребуется инвалидировать результат и после SQL-записи, и после записи MongoDB; в кэш попадут цена и остаток.</td></tr><tr><td>Отзыв JWT / серверные сессии</td><td>Отдельная задача. Сейчас активность пользователя проверяется в SQL на каждом запросе; для адресного отзыва JWT понадобятся дополнительные данные токена.</td></tr><tr><td>Счётчик просмотров / очередь фоновых задач</td><td>Расширение при появлении соответствующего API или обработчиков. В текущем каталоге таких сценариев пока нет.</td></tr></tbody></table>
+<p>Наша граница кэша — <b>только attributes</b>. Для учебного каталога это компромисс: допускаем короткое устаревание описательных характеристик, а актуальные SQL-поля и проверку прав продолжаем читать из PostgreSQL.</p>
+<p>Само подключение Redis не доказывает ускорение: на промахе добавляются сетевые обращения. Полезность проверяем по частоте попаданий, числу Mongo-запросов и времени ответа на своей нагрузке.</p>
+    <hr>
+
+    <h2>За что отвечает каждое хранилище</h2>
+<pre class="language-text"><code>HTTP → JWT + активный пользователь из SQL → SQL-товар / список
+                                               │
+                                  id выбранных товаров
+                                               ↓
+                                  Redis: кэш attributes
+                                   │ hit       │ miss
+                                   │           ↓
+                                   │      MongoDB: attributes
+                                   │           │
+                                   └─────┬─────┘
+                                         ↓
+                              ProductWithAttributesRead
+</code></pre>
+<p>PostgreSQL и MongoDB хранят исходные данные. Redis содержит копии характеристик и временные счётчики. Потеря кэша не должна удалять товары, характеристики или пользователей.</p>
+<p>GET с попаданием в кэш всё равно обращается к SQL. Он экономит чтение характеристик из MongoDB, но не обходит авторизацию, поиск, фильтры, проверку существования и блокировки пользователя.</p>
+    <hr>
+
+    <h2>Cache-aside: сначала кэш, затем источник</h2>
+<ol>
+<li>Существующие зависимости проверяют токен и читают SQL-товары.</li>
+<li>Одной командой <code>MGET</code> получаем кэш для всех выбранных id.</li>
+<li>Для отсутствующих или повреждённых значений выполняем один Mongo-запрос с <code>$in</code>.</li>
+<li>Собираем и валидируем <code>ProductWithAttributesRead</code>.</li>
+<li>Найденные в MongoDB характеристики кладём в Redis с TTL. Порядок SQL-товаров сохраняется.</li>
+</ol>
+<p><b>Hit</b> — пригодное значение есть в Redis; <b>miss</b> — его нет. Отсутствующий Mongo-документ вернём как <code>attributes: null</code> и в этой практике кэшировать не будем. Поэтому Redis nil всегда означает промах.</p>
+<p>Если у списка закэширована только часть характеристик, MongoDB нужна только для оставшихся id. Размер списка по-прежнему ограничен query-параметром <code>limit</code>.</p>
+    <hr>
+
+    <h2>Ключи и TTL</h2>
+<pre class="language-text"><code>products:attributes:42   → {&quot;attributes&quot;:{&quot;layout&quot;:&quot;ANSI&quot;,&quot;wireless&quot;:false}}
+auth:login:127.0.0.1 → 3
+</code></pre>
+<p>Ключ <code>products:attributes:42</code> хранит характеристики товара с id=42, а <code>auth:login:127.0.0.1</code> — число попыток входа с этого IP. Имена задаём прямо в коде. У копии attributes TTL 30 секунд, у счётчика входа — 60 секунд.</p>
+<p>Search, category, limit и only_available не входят в ключ характеристики: они выбирают товары в SQL, но не меняют attributes одного и того же товара. Для кэша полного списка эти параметры пришлось бы включить в ключ.</p>
+<p>Сейчас товар виден всем активным пользователям одинаково. Если характеристики станут зависеть от пользователя или языка, ключ и границу кэша нужно пересмотреть. Пароли и JWT в кэше не нужны.</p>
+    <hr>
+
+    <h2>Добавляем Redis в существующий Compose</h2>
+<p><b><code>compose.yaml</code> — добавить сервис redis внутрь services</b>. Существующие PostgreSQL, MongoDB, реквизиты, тома и имя Compose-проекта сохраняем.</p>
+<pre class="language-yaml" data-file="compose.yaml" data-mode="add-service"><code>  redis:
+    image: redis:7.4-alpine
+    command: [&quot;redis-server&quot;, &quot;--save&quot;, &quot;&quot;, &quot;--appendonly&quot;, &quot;no&quot;]
+    ports:
+      - &quot;127.0.0.1:6379:6379&quot;
+    healthcheck:
+      test: [&quot;CMD&quot;, &quot;redis-cli&quot;, &quot;ping&quot;]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+</code></pre><pre class="language-powershell"><code>docker compose up -d --wait postgres mongo redis
+docker compose ps
+</code></pre>
+<p>В этой конфигурации Redis хранит временные данные: snapshots и AOF отключены, отдельный volume не нужен. Перезапуск Redis очистит и кэш, и лимиты. Том сам по себе не заменяет настройку persistence.</p>
+<p>Используем Redis 7.4 из исходной лекции. Все команды практики поддерживаются этой версией; новые серверные команды не требуются. Python API, как и раньше, работает локально.</p>
+    <hr>
+
+    <h2>Первые команды в redis-cli</h2>
+<pre class="language-powershell"><code>docker compose exec redis redis-cli
+</code></pre>
+<p>Следующие команды выполняем уже внутри redis-cli. Префикс <code>demo:</code> отделён от ключей приложения.</p>
+<pre class="language-text"><code>SET demo:attributes:42 &#x27;{&quot;layout&quot;:&quot;ANSI&quot;}&#x27; EX 30
+GET demo:attributes:42
+MGET demo:attributes:42 demo:attributes:43
+TTL demo:attributes:42
+DEL demo:attributes:42
+
+INCR demo:login
+EXPIRE demo:login 60
+TTL demo:login
+DEL demo:login
+</code></pre>
+<p><code>SET ... EX</code> задаёт значение и время жизни одной командой. TTL показывает оставшиеся секунды, <code>-2</code> — ключа нет, <code>-1</code> — срок не задан. В Python используем <code>set(..., ex=...)</code>.</p>
+<p>Отдельные INCR и EXPIRE здесь нужны для знакомства с командами. В limiter объединим их транзакцией Redis. Для просмотра своих ключей используйте <code>SCAN</code>, без очистки всей базы через FLUSHDB.</p>
+<p>Справка: <a href="https://redis.io/docs/latest/commands/set/">SET</a>, <a href="https://redis.io/docs/latest/commands/expire/">EXPIRE и TTL</a>, <a href="https://redis.io/docs/latest/commands/mget/">MGET</a>.</p>
+    <hr>
+
+    <h2>Драйвер и настройки</h2>
+<pre class="language-powershell"><code>uv add redis
+</code></pre>
+<p><b><code>app/core/config.py</code> — добавить поля в Settings</b>. <code>Field</code> уже импортирован. Асинхронный клиент находится в обычном пакете redis; дополнительные зависимости для примера не нужны.</p>
+<pre class="language-python" data-file="app/core/config.py" data-mode="add-settings-fields"><code>redis_url: str | None = None
+attributes_cache_ttl_seconds: int = Field(default=30, gt=0)
+auth_rate_limit_per_minute: int = Field(default=5, gt=0)
+</code></pre>
+<p><b><code>.env</code> и <code>.env.example</code> — добавить значения</b>; DATABASE_URL, MONGODB_URL и остальные параметры сохраняем.</p>
+<pre class="language-ini" data-file=".env" data-mode="add-values"><code>REDIS_URL=redis://127.0.0.1:6379/0
+ATTRIBUTES_CACHE_TTL_SECONDS=30
+AUTH_RATE_LIMIT_PER_MINUTE=5
+</code></pre>
+<p>Без REDIS_URL значение равно None: кэш и limiter пропускаются. Для этого переменную нужно убрать, а не задавать пустую строку.</p>
+    <hr>
+
+    <h2>Redis в существующем lifespan</h2>
+<p>Сохраняем lifespan из L9: SQL Engine, создание пользователей и MongoDB остаются на своих местах. Добавляем клиент Redis и его закрытие.</p>
+<p><b><code>app/core/lifespan.py</code> — добавить импорт.</b></p>
+<pre class="language-python" data-file="app/core/lifespan.py" data-mode="add-imports"><code>from redis.asyncio import Redis
+</code></pre>
+<p>В функции появятся три изменения: начальное значение <code>redis_client = None</code>, создание клиента перед yield и <code>await redis_client.aclose()</code> при завершении. Полная функция показана далее, чтобы не потерять существующую очистку MongoDB и SQL.</p>
+    <hr>
+
+    <h2>Lifespan: создание и закрытие клиента</h2>
+<p><b><code>app/core/lifespan.py</code> — заменить только функцию lifespan вместе с декоратором.</b> Остальные импорты и logger из L9 сохраняем.</p>
+<pre class="language-python" data-file="app/core/lifespan.py" data-mode="replace-function" data-function="lifespan"><code>@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = app.state.settings
+    configure_logging()
+    logger.info(&quot;App starting up...&quot;)
+    engine = create_database_engine(settings.database_url)
+    mongo_client = None
+    redis_client = None
+    app.state.redis = None
+    app.state.engine = engine
+    app.state.mongo_database = None
+    try:
+        if settings.debug:
+            with Session(engine) as db:
+                seed_users(db, settings)
+
+        if settings.mongodb_url is not None:
+            mongo_client = AsyncMongoClient(
+                settings.mongodb_url, tz_aware=True,
+                serverSelectionTimeoutMS=3000,
+            )
+            await mongo_client.admin.command(&quot;ping&quot;)
+            database = mongo_client[settings.mongodb_database]
+            await ensure_product_attribute_indexes(database)
+            app.state.mongo_database = database
+        if settings.redis_url is not None:
+            redis_client = Redis.from_url(
+                settings.redis_url, decode_responses=True,
+                socket_connect_timeout=1, socket_timeout=1,
+            )
+            app.state.redis = redis_client
+        yield
+    finally:
+        try:
+            if redis_client is not None:
+                await redis_client.aclose()
+        finally:
+            try:
+                if mongo_client is not None:
+                    await mongo_client.close()
+            finally:
+                engine.dispose()
+    logger.info(&quot;App shutting down...&quot;)
+</code></pre>
+<p>from_url создаёт клиент, а соединение будет установлено при первой команде. Отдельный обязательный ping не нужен: Redis здесь необязателен. Ошибки запросов обработаем в функциях кэша и limiter.</p>
+<p>Один клиент обслуживает всё приложение. Вложенные finally гарантируют закрытие остальных ресурсов, даже если одно из закрытий завершилось ошибкой. Ошибка запуска MongoDB по-прежнему прерывает запуск, как в L9.</p>
+<p>Таймауты ограничивают ожидание одной сетевой попытки; встроенные повторы клиента могут увеличить общее время. Настройку повторов оставляем отдельной темой: <a href="https://redis.io/docs/latest/develop/clients/redis-py/produsage/">таймауты и повторы redis-py</a>.</p>
+    <hr>
+
+    <h2>Зависимость RedisDep</h2>
+<p><b><code>app/dependencies/redis.py</code> — новый файл.</b></p><pre class="language-python" data-file="app/dependencies/redis.py" data-mode="create"><code>from typing import Annotated
+
+from fastapi import Depends
+from redis.asyncio import Redis
+from starlette.requests import Request
+
+
+def get_redis(request: Request) -&gt; Redis | None:
+    return request.app.state.redis
+
+
+RedisDep = Annotated[Redis | None, Depends(get_redis)]
+</code></pre>
+<p>Зависимость возвращает клиент конкретного приложения. Он создаётся один раз внутри lifespan и использует пул соединений. Не создаём Redis на каждый запрос и не берём глобальные settings при импорте.</p>
+<p>RedisDep допускает None: это штатный запуск без Redis. MongoDatabaseDep остаётся обязательной для составных GET. Синхронные SQL-зависимости L9 продолжают выполняться в thread pool, асинхронные команды Redis и MongoDB вызываем с await.</p>
+    <hr>
+
+    <h2>Кэш: формат и проверка данных</h2>
+<p><b><code>app/services/attribute_cache.py</code> — новый файл.</b></p>
+<pre class="language-python" data-file="app/services/attribute_cache.py" data-mode="create"><code>import logging
+
+from pydantic import BaseModel, ConfigDict, ValidationError
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+
+from app.core.config import Settings
+from app.schemas.product_attributes import AttributeKey, AttributeValue
+
+logger = logging.getLogger(__name__)
+
+
+class CachedAttributes(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+    attributes: dict[AttributeKey, AttributeValue]
+
+
+def attribute_cache_key(product_id: int) -&gt; str:
+    return f&quot;products:attributes:{product_id}&quot;
+</code></pre>
+<p>Используем уже знакомый BaseModel. В кэше лежит JSON вида <code>{"attributes": {"layout": "ANSI"}}</code>. Эта же модель проверяет данные и превращает их в JSON для Redis.</p>
+<p><code>allow_inf_nan=False</code> запрещает специальные значения float: <code>inf</code> — положительную бесконечность, <code>-inf</code> — отрицательную бесконечность и <code>nan</code> — «не число». Например, <code>float("inf")</code> и <code>float("nan")</code> не пройдут проверку этой модели: Pydantic выдаст ошибку валидации. Такие значения не предусмотрены стандартным JSON, поэтому числовые характеристики в кэше должны быть конечными. Это проверка Pydantic, а не ограничение самого Redis.</p>
+<p>ObjectId и даты остаются в MongoDB. В Redis это обычная строка, модуль RedisJSON не требуется. В модель чтения не переносим лимит 50 ключей: он относится к одному PUT/PATCH, а несколько PATCH могут накопить больше характеристик.</p>
+    <hr>
+
+    <h2>Кэш: пакетное чтение через MGET</h2>
+<p><b><code>app/services/attribute_cache.py</code> — продолжение.</b></p>
+<pre class="language-python" data-file="app/services/attribute_cache.py" data-mode="append"><code>async def read_cached_attributes(
+    redis: Redis | None, product_ids: list[int],
+) -&gt; dict[int, dict]:
+    if redis is None or not product_ids:
+        return {}
+    keys = [attribute_cache_key(product_id) for product_id in product_ids]
+    try:
+        values = await redis.mget(keys)
+    except RedisError:
+        logger.warning(&quot;Redis read failed; using MongoDB&quot;)
+        return {}
+
+    found = {}
+    for product_id, raw in zip(product_ids, values):
+        if raw is not None:
+            try:
+                found[product_id] = CachedAttributes.model_validate_json(raw).attributes
+            except ValidationError:
+                logger.warning(&quot;Invalid cache for product %s&quot;, product_id)
+    return found
+</code></pre>
+<p>Один MGET получает кэш для всех выбранных товаров. Порядок значений соответствует порядку ключей. Нет ключа или JSON не прошёл проверку — прочитаем MongoDB.</p>
+<p>Ошибка Redis тоже означает промах. Ошибки MongoDB и SQL не скрываем. Пример рассчитан на один Redis-сервер; ограничения многоключевых операций Redis Cluster — отдельная тема.</p>
+    <hr>
+
+    <h2>Кэш: запись нескольких значений</h2>
+<p><b><code>app/services/attribute_cache.py</code> — продолжение.</b></p>
+<pre class="language-python" data-file="app/services/attribute_cache.py" data-mode="append"><code>async def write_cached_attributes(
+    redis: Redis | None, by_id: dict[int, dict], settings: Settings,
+) -&gt; None:
+    if redis is None or not by_id:
+        return
+    try:
+        async with redis.pipeline(transaction=False) as pipe:
+            for product_id, attributes in by_id.items():
+                value = CachedAttributes(attributes=attributes).model_dump_json()
+                pipe.set(
+                    attribute_cache_key(product_id), value,
+                    ex=settings.attributes_cache_ttl_seconds,
+                )
+            await pipe.execute()
+    except RedisError:
+        logger.warning(&quot;Redis fill failed; returning source data&quot;)
+</code></pre>
+<p>model_dump_json превращает Pydantic-модель в строку. SET одновременно сохраняет её и задаёт TTL, поэтому отдельный EXPIRE для кэша не требуется.</p>
+<p>Pipeline собирает SET-команды и отправляет их пакетом при execute. Вызовы pipe.set не требуют await. Для заполнения кэша общая транзакция не нужна: если сохранилась только часть значений, остальные позже прочитаем из MongoDB.</p>
+<p>Ошибка заполнения Redis не отменяет успешное чтение источника. Подробнее: <a href="https://redis.readthedocs.io/en/stable/examples/asyncio_examples.html">асинхронный pipeline</a>.</p>
+    <hr>
+
+    <h2>Кэш: инвалидация после записи</h2>
+<p><b><code>app/services/attribute_cache.py</code> — продолжение.</b></p><pre class="language-python" data-file="app/services/attribute_cache.py" data-mode="append"><code>async def invalidate_cached_attributes(
+    redis: Redis | None, product_id: int,
+) -&gt; None:
+    if redis is None:
+        return
+    try:
+        await redis.delete(attribute_cache_key(product_id))
+    except RedisError:
+        logger.warning(&quot;Redis invalidation failed for product %s; relying on TTL&quot;, product_id)
+</code></pre>
+<p>После успешной записи MongoDB удаляем копию attributes. Следующий GET заполнит её заново. В кэше нет списков: один DEL обновляет и карточку, и все списки, которые содержат этот товар. Поиск ключей по шаблону не нужен.</p>
+<p>Если DEL не прошёл, исходная запись уже выполнена. Возвращаем успешный ответ записи, пишем предупреждение и полагаемся на TTL. Это сознательный выбор согласованности для описательных характеристик; общей транзакции MongoDB + Redis нет.</p>
+    <hr>
+
+    <h2>add_attributes: собрать ответ и заполнить кэш</h2>
+<p><b><code>app/services/product_attributes.py</code> — добавить импорты и заменить add_attributes.</b> Ошибки и операции записи L9 сохраняем.</p>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="add-imports"><code>from redis.asyncio import Redis
+
+from app.core.config import Settings
+from app.services.attribute_cache import (
+    CachedAttributes, read_cached_attributes, write_cached_attributes,
+)
+</code></pre>
+<pre class="language-python" data-file="app/services/product_attributes.py" data-mode="replace-function" data-function="add_attributes"><code>async def add_attributes(
+    products: list[ProductRead], database: AsyncDatabase,
+    redis: Redis | None, settings: Settings,
+) -&gt; list[ProductWithAttributesRead]:
+    if not products:
+        return []
+    ids = [product.id for product in products]
+    by_id = await read_cached_attributes(redis, ids)
+    missing = [product_id for product_id in ids if product_id not in by_id]
+
+    if missing:
+        fresh = {}
+        cursor = database[&quot;product_attributes&quot;].find(
+            {&quot;product_id&quot;: {&quot;$in&quot;: missing}},
+            {&quot;_id&quot;: 0, &quot;product_id&quot;: 1, &quot;attributes&quot;: 1},
+        )
+        async for document in cursor:
+            value = CachedAttributes(attributes=document[&quot;attributes&quot;])
+            fresh[document[&quot;product_id&quot;]] = value.attributes
+        by_id.update(fresh)
+        await write_cached_attributes(redis, fresh, settings)
+
+    return [
+        ProductWithAttributesRead(
+            **product.model_dump(), attributes=by_id.get(product.id),
+        )
+        for product in products
+    ]
+</code></pre>
+<p>Кэш и MongoDB проверяются одной моделью CachedAttributes. Ошибку документа источника не превращаем в null; повреждённую копию Redis считаем промахом.</p>
+<p>Если все значения нашлись в Redis, Mongo-запрос не выполняется. Пустой список не требует сетевых обращений. Отсутствующие Mongo-документы не кэшируем: в ответе будет attributes=null.</p>
+    <hr>
+
+    <h2>GET товара и списка: контракт сохраняется</h2>
+<p><b><code>app/routers/product.py</code> — дополнить импорты и заменить два GET вместе с декораторами.</b></p>
+<pre class="language-python" data-file="app/routers/product.py" data-mode="add-imports"><code>from app.dependencies.redis import RedisDep
+from app.dependencies.settings import SettingsDep
+</code></pre><pre class="language-python" data-file="app/routers/product.py" data-mode="replace-function" data-function="get_product"><code>@router.get(&quot;/{product_id}&quot;, response_model=ProductWithAttributesRead)
+async def get_product(
+    product: ExistingProductDep, database: MongoDatabaseDep,
+    redis: RedisDep, settings: SettingsDep,
+) -&gt; ProductWithAttributesRead:
+    products = await add_attributes([product], database, redis, settings)
+    return products[0]
+</code></pre><pre class="language-python" data-file="app/routers/product.py" data-mode="replace-function" data-function="list_products"><code>@router.get(&quot;&quot;, response_model=list[ProductWithAttributesRead])
+async def list_products(
+    products: ProductListDep, database: MongoDatabaseDep,
+    redis: RedisDep, settings: SettingsDep,
+) -&gt; list[ProductWithAttributesRead]:
+    return await add_attributes(products, database, redis, settings)
+</code></pre>
+<p>ExistingProductDep проверяет вход и существование SQL-товара. ProductListDep по-прежнему использует load_product_list с search, category, limit и only_available. Эти зависимости, SQL CRUD и схемы ответа не переписываем.</p>
+<p>Кэш общедоступных характеристик не даёт права на чтение. Без токена по-прежнему 401, заблокированному пользователю — 403, удалённому SQL-товару — 404, даже если ключ Redis ещё существует.</p>
+    <hr>
+
+    <h2>PUT характеристик: сначала источник, затем DEL</h2>
+<p><b><code>app/routers/product_attributes.py</code> — заменить файл этой частью и продолжением со следующего слайда.</b></p>
+<pre class="language-python" data-file="app/routers/product_attributes.py" data-mode="replace"><code>from fastapi import APIRouter
+
+from app.dependencies.auth import AdminUserDep
+from app.dependencies.mongodb import MongoDatabaseDep
+from app.dependencies.redis import RedisDep
+from app.dependencies.product import ExistingProductIdDep
+from app.schemas.product_attributes import (
+    ProductAttributesPatch, ProductAttributesPut, ProductAttributesRead,
+)
+from app.services.attribute_cache import invalidate_cached_attributes
+from app.services.product_attributes import (
+    delete_attributes, patch_attributes, put_attributes,
+)
+
+router = APIRouter(prefix=&quot;/products&quot;, tags=[&quot;Product attributes&quot;])
+
+
+@router.put(&quot;/{product_id}/attributes&quot;, response_model=ProductAttributesRead)
+async def replace_product_attributes(
+    payload: ProductAttributesPut,
+    _admin: AdminUserDep,
+    product_id: ExistingProductIdDep,
+    database: MongoDatabaseDep,
+    redis: RedisDep,
+) -&gt; ProductAttributesRead:
+    response = await put_attributes(product_id, payload, database)
+    await invalidate_cached_attributes(redis, product_id)
+    return response
+</code></pre>
+<p>AdminUserDep и ExistingProductIdDep сохраняют проверки L9. put_attributes завершает атомарную запись MongoDB и возвращает ProductAttributesRead. Только после успеха удаляем Redis-копию. Если запись завершилась ошибкой, до инвалидации выполнение не дойдёт.</p>
+    <hr>
+
+    <h2>PATCH и DELETE характеристик: та же инвалидация</h2>
+<p><b><code>app/routers/product_attributes.py</code> — продолжение.</b></p><pre class="language-python" data-file="app/routers/product_attributes.py" data-mode="append"><code>@router.patch(&quot;/{product_id}/attributes&quot;, response_model=ProductAttributesRead)
+async def update_product_attributes(
+    payload: ProductAttributesPatch,
+    _admin: AdminUserDep,
+    product_id: ExistingProductIdDep,
+    database: MongoDatabaseDep,
+    redis: RedisDep,
+) -&gt; ProductAttributesRead:
+    response = await patch_attributes(product_id, payload, database)
+    await invalidate_cached_attributes(redis, product_id)
+    return response
+
+
+@router.delete(&quot;/{product_id}/attributes&quot;, status_code=204)
+async def remove_product_attributes(
+    _admin: AdminUserDep,
+    product_id: ExistingProductIdDep,
+    database: MongoDatabaseDep,
+    redis: RedisDep,
+) -&gt; None:
+    await delete_attributes(product_id, database)
+    await invalidate_cached_attributes(redis, product_id)
+</code></pre>
+<p>PATCH по-прежнему изменяет отдельные ключи через $set, DELETE удаляет Mongo-документ. Форматы 200 и 204, ошибки 404/409 и запрет записи для user сохраняются. Клиентские значения не превращаем в имена произвольных ключей Redis.</p>
+    <hr>
+
+    <h2>Какие изменения требуют инвалидации</h2>
+<table><thead><tr><th>Операция</th><th>Что происходит с кэшем attributes</th></tr></thead><tbody><tr><td>PUT/PATCH/DELETE /products/{id}/attributes</td><td>После успешной записи MongoDB — DEL одного ключа.</td></tr><tr><td>POST /products</td><td>Кэша списков нет: новый SQL-товар сразу участвует в выборке. Отсутствующие attributes не кэшируем.</td></tr><tr><td>PUT/PATCH /products/{id}</td><td>Цена, наличие, остаток и specs читаются из SQL. Кэш attributes их не содержит.</td></tr><tr><td>DELETE /products/{id}</td><td>SQL-проверка вернёт 404 до чтения кэша; оставшийся ключ истечёт по TTL.</td></tr><tr><td>Ручная правка MongoDB вне API</td><td>Наш DEL не вызывается: копия может жить до истечения TTL.</td></tr></tbody></table>
+<p>Ключи и права должны опираться на серверный id. SQL-id не переиспользуем: после сброса sequence или восстановления только одной базы нужны согласованная очистка и проверка связей. Старый Mongo-документ после SQL DELETE сам не исчезает — это прежнее ограничение L9, кэш его не исправляет.</p>
+    <hr>
+
+    <h2>TTL и DEL не дают строгой согласованности</h2>
+<pre class="language-text"><code>GET A: miss → прочитал старые attributes из MongoDB
+PATCH B: записал новые attributes → DEL кэша → ответил 200
+GET A: положил старые attributes в Redis с TTL 30 секунд
+GET C: получил старую копию
+</code></pre>
+<p>Удаление после записи не устраняет гонку с уже выполняющимся GET. TTL ограничивает срок жизни конкретной копии с момента её заполнения, а не гарантирует свежесть сразу после PATCH. Не обещаем «не более 30 секунд после изменения»: старый GET мог заполнить кэш позже.</p>
+<p>Для описательных характеристик в учебной задаче принимаем такую eventual consistency. Для строгого чтения после записи кэш можно обходить; более сложный вариант потребует протокола версий/условной записи. Один дополнительный DEL или блокировка только внутри процесса полной гарантии не дают.</p>
+<p>Кэш цены или остатка потребовал бы отдельного решения о допустимой свежести. В нашей границе эти поля читаются из SQL, без задержки именно из-за Redis.</p>
+    <hr>
+
+    <h2>Что произойдёт при отказе хранилища</h2>
+<table><thead><tr><th>Ситуация</th><th>Поведение после этой лекции</th></tr></thead><tbody><tr><td>REDIS_URL отсутствует</td><td>Прежнее поведение L9: данные из SQL + MongoDB, limiter пропущен.</td></tr><tr><td>Redis недоступен во время GET</td><td>Предупреждение в логах; кэш пропускается, характеристики читаются из MongoDB.</td></tr><tr><td>Redis не принял SET или DEL</td><td>Успешное чтение/изменение исходных данных остаётся успешным; пропущенную инвалидацию компенсирует TTL.</td></tr><tr><td>MongoDB пропала после запуска; есть пригодный кэш</td><td>GET может вернуть 200 с SQL-полями и закэшированными attributes.</td></tr><tr><td>MongoDB пропала; хотя бы одного нужного документа нет в кэше</td><td>503 по обработчику L9. Частичный список со скрытой ошибкой не возвращаем.</td></tr><tr><td>MONGODB_URL отсутствует</td><td>MongoDatabaseDep вернёт 503 и не пустит GET к кэшу: сохраняем явное отключение составного чтения.</td></tr><tr><td>MongoDB недоступна при старте с заданным URL</td><td>Запуск прерывается по правилам L9, независимо от Redis.</td></tr></tbody></table>
+<p>Появилась одна новая возможность: тёплый кэш позволяет прочитать характеристики во время сетевого отказа MongoDB. Отсутствующий документ — всё ещё null; отказ источника при miss — 503. /health по-прежнему проверяет только SQL и не является общей readiness-проверкой.</p>
+    <hr>
+
+    <h2>Rate limiting для нашего входа</h2>
+<p><code>POST /auth/obtain_token</code> проверяет Argon2-пароль. Для него введём отдельный счётчик: не более 5 корректно сформированных попыток входа с одного IP за окно 60 секунд. Успешные и неуспешные попытки учитываются одинаково.</p>
+<p>Лимит применяем до вызова authenticate_user. JWT, OAuth2PasswordRequestForm, username в sub, блокировка пользователя и ответ Token остаются прежними. Лимит не зависит от того, существует ли указанный username.</p>
+<p>Используем Redis-счётчик, общий для экземпляров одного окружения. Это не отзыв JWT, не серверная сессия и не блокировка самого пользователя.</p>
+    <hr>
+
+    <h2>Транзакция для счётчика входа</h2>
+<p>Для limiter достаточно знакомого pipeline, но теперь с <code>transaction=True</code>. Redis выполнит команды одной транзакцией:</p>
+<ol><li>INCR увеличит счётчик.</li><li>EXPIRE с NX назначит 60 секунд, только если у ключа ещё нет срока.</li><li>TTL вернёт оставшееся время для Retry-After.</li></ol>
+<p>Последующие попытки не продлевают окно. Между отдельными INCR и EXPIRE больше нет клиентского разрыва. EXPIRE NX поддерживается с Redis 7.0; наш Redis 7.4 подходит.</p>
+<p>Это окно от первой попытки, а не скользящий интервал: на границе двух окон возможен всплеск.</p>
+<p><b><code>app/dependencies/rate_limit.py</code> — новый файл, начало.</b></p>
+<pre class="language-python" data-file="app/dependencies/rate_limit.py" data-mode="create"><code>import logging
+from typing import Annotated
+
+from fastapi import Depends, HTTPException
+from redis.exceptions import RedisError
+from starlette.requests import Request
+
+from app.dependencies.redis import RedisDep
+from app.dependencies.settings import SettingsDep
+
+logger = logging.getLogger(__name__)
+</code></pre>
+<p>Документация: <a href="https://redis.io/docs/latest/commands/expire/">EXPIRE NX</a>, <a href="https://redis.readthedocs.io/en/stable/examples/asyncio_examples.html#transactions-multi-exec">транзакции в async pipeline</a>.</p>
+    <hr>
+
+    <h2>Зависимость limiter и ответ 429</h2>
+<p><b><code>app/dependencies/rate_limit.py</code> — продолжение.</b></p>
+<pre class="language-python" data-file="app/dependencies/rate_limit.py" data-mode="append"><code>async def limit_login_attempts(
+    request: Request, redis: RedisDep, settings: SettingsDep,
+) -&gt; None:
+    if redis is None:
+        return
+    host = request.client.host if request.client else &quot;unknown&quot;
+    key = f&quot;auth:login:{host}&quot;
+    try:
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            pipe.expire(key, 60, nx=True)
+            pipe.ttl(key)
+            attempts, _, ttl = await pipe.execute()
+    except RedisError:
+        logger.warning(&quot;Redis limiter unavailable; allowing password check&quot;)
+        return
+    if attempts &gt; settings.auth_rate_limit_per_minute:
+        raise HTTPException(
+            status_code=429, detail=&quot;Слишком много попыток входа&quot;,
+            headers={&quot;Retry-After&quot;: str(max(1, ttl))},
+        )
+
+
+LoginRateLimitDep = Annotated[None, Depends(limit_login_attempts)]
+</code></pre>
+<p>execute возвращает результаты трёх команд в том же порядке. Нам нужны число попыток и TTL; результат назначения срока пропускаем через переменную _.</p>
+<p>После лимита возвращаем 429 и Retry-After. При отказе Redis выполняем обычную проверку пароля и пишем предупреждение. Такой дополнительный limiter не гарантирует защиту при отказе или перезапуске Redis.</p>
+<p>Общий IP объединяет пользователей за NAT. За reverse proxy нужно настроить доверенные прокси ASGI-сервера; произвольному X-Forwarded-For из запроса доверять нельзя.</p>
+    <hr>
+
+    <h2>Подключаем к POST /auth/obtain_token</h2>
+<p><b><code>app/routers/auth.py</code> — добавить импорт и заменить login вместе с декоратором.</b> Остальные импорты, router, LoginForm и /me сохраняем.</p>
+<pre class="language-python" data-file="app/routers/auth.py" data-mode="add-imports"><code>from app.dependencies.rate_limit import LoginRateLimitDep
+</code></pre><pre class="language-python" data-file="app/routers/auth.py" data-mode="replace-function" data-function="login"><code>@router.post(&quot;/obtain_token&quot;, response_model=Token)
+def login(
+    form: LoginForm, db: SessionDep, settings: SettingsDep,
+    _limit: LoginRateLimitDep,
+) -&gt; Token:
+    user = authenticate_user(db, form.username, form.password)
+    if user is None:
+        raise invalid_credentials()
+    if user.disabled:
+        raise HTTPException(status_code=403, detail=&quot;Пользователь заблокирован&quot;)
+    return Token(access_token=create_access_token(user.username, settings))
+</code></pre>
+<p>Асинхронная зависимость выполняет команды Redis до вызова обработчика. Сам login остаётся def: FastAPI выполняет синхронную проверку SQL и пароля в thread pool. Новую отдельную схему токена и другой URL входа не вводим.</p>
+<p>Счётчик учитывает запросы, дошедшие до зависимости; это не универсальный лимит любых некорректных HTTP-запросов. Разбор тела и зависимостей не заменяет лимиты на уровне входного прокси.</p>
+    <hr>
+
+    <h2>Проверка через Swagger и redis-cli</h2>
+<ol>
+<li>Запустите три сервиса, выполните <code>uv run alembic upgrade head</code> и запустите API.</li>
+<li>Войдите как admin и создайте товар. GET без Mongo-документа вернёт attributes=null.</li>
+<li>PUT /products/{id}/attributes: задайте layout, switch и wireless. Первый GET заполнит Redis; повторный использует копию.</li>
+<li>В redis-cli проверьте GET и TTL ключа с нужным id. PATCH характеристик удалит ключ; следующий GET заполнит его новым значением.</li>
+<li>Измените price и stock_count SQL PATCH-запросом. Следующий GET должен сразу вернуть новые SQL-поля вместе с кэшированными attributes.</li>
+<li>Проверьте список с несколькими товарами, search/category/limit/only_available и чтение как user.</li>
+<li>Выполните больше 5 входов с одного адреса в пределах окна: получите 429. Подождите срок Retry-After и повторите.</li>
+</ol>
+<pre class="language-powershell"><code>docker compose up -d --wait postgres mongo redis
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload
+</code></pre>
+<p>Для наблюдения используйте отдельный терминал с redis-cli. Успешный вход Swagger тоже расходует попытку; для повторных учебных прогонов можно дождаться TTL. Очищать весь Redis для этого не нужно.</p>
+    <hr>
+
+    <h2>Стоимость и границы решения</h2>
+<ul>
+<li>При полном hit нет Mongo-запроса; SQL-проверки всё равно выполняются. При частичном miss — один Mongo-запрос на выбранные id.</li>
+<li>На холодном кэше появились MGET и заполнение pipeline. Сравниваем нагрузку и задержки до и после, а не обещаем ускорение по факту установки Redis.</li>
+<li>TTL не задаёт лимит памяти. Для рабочего Redis отдельно выбирают maxmemory, eviction policy и наблюдают ошибки/попадания. Вытеснение ключа limiter может сбросить счётчик раньше TTL; при строгом лимите кэш и лимиты стоит разделять по ресурсам и политике отказа.</li>
+<li>Популярный ключ после истечения TTL могут одновременно заполнять несколько GET: это cache stampede. Для небольшой учебной нагрузки допускаем повторы; при необходимости отдельно добавляют координацию и разброс TTL.</li>
+<li>Транзакция Redis не объединяет его запись с MongoDB или PostgreSQL.</li>
+</ul>
+    <hr>
+
+    <h2>Практика и результат</h2>
+<ol>
+<li>Добавьте Redis к существующему Compose, не меняя SQL/Mongo и их тома.</li>
+<li>Добавьте поля Settings, .env/.env.example, RedisDep и обновлённый lifespan.</li>
+<li>Соберите attribute_cache.py, замените add_attributes и передайте новые аргументы из двух GET.</li>
+<li>После успешных PUT/PATCH/DELETE характеристик выполняйте DEL. Убедитесь, что SQL-поля читаются свежими.</li>
+<li>Подключите атомарный limiter к /auth/obtain_token, сохранив форму входа, JWT и роли.</li>
+<li>Проверьте hit/miss, частичный miss списка, TTL, инвалидацию, 401/403/404/429/503 и отказ Redis.</li>
+</ol>
+<p>После L10 те же GET возвращают SQL-товар с характеристиками из MongoDB или Redis-копии. Redis сокращает повторные чтения описательных attributes и считает попытки входа. Изменения SQL и MongoDB продолжают выполняться в исходных хранилищах.</p>
+<p><b>Дополнительно:</b> измерьте hit ratio и Mongo-запросы для списка. Затем спроектируйте кэш всего ответа: перечислите все SQL/Mongo-записи, ключи query-параметров и гарантии свежести, которые потребуются для такой границы.</p>
+    <hr>
+
+    <h2>Официальные материалы</h2>
+<ul>
+<li><a href="https://redis.readthedocs.io/en/stable/examples/asyncio_examples.html">redis-py Asyncio: клиент, пул, aclose и pipeline</a>.</li>
+<li><a href="https://redis.io/docs/latest/develop/clients/redis-py/produsage/">redis-py: таймауты, повторы и ошибки соединения</a>.</li>
+<li><a href="https://redis.io/docs/latest/commands/set/">SET и EX</a>.</li>
+<li><a href="https://redis.io/docs/latest/commands/mget/">MGET: пакетное чтение и ограничения Cluster</a>.</li>
+<li><a href="https://redis.io/docs/latest/commands/expire/">EXPIRE: время жизни ключа</a>.</li>
+<li><a href="https://redis.io/docs/latest/commands/incr/">INCR: счётчики и ограничение запросов</a>.</li>
+<li><a href="https://redis.io/docs/latest/develop/use/pipelining/">Redis pipelining</a>.</li>
+</ul>
+    <hr>
+  </db-content>
+  <footer class="site-footer">
+    <div class="footer-logo-link"></div>
+  </footer>
+</div>
+</body>
+</html>

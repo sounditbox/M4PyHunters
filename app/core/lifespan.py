@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from pymongo import AsyncMongoClient
+from redis.asyncio import Redis
 from sqlmodel import Session
 
 from app.core.logging_conf import configure_logging
@@ -20,6 +21,8 @@ async def lifespan(app: FastAPI):
     logger.info("App starting up...")
     engine = create_database_engine(settings.database_url)
     mongo_client = None
+    redis_client = None
+    app.state.redis = None
     app.state.engine = engine
     app.state.mongo_database = None
     try:
@@ -36,11 +39,21 @@ async def lifespan(app: FastAPI):
             database = mongo_client[settings.mongodb_database]
             await ensure_product_attribute_indexes(database)
             app.state.mongo_database = database
+        if settings.redis_url is not None:
+            redis_client = Redis.from_url(
+                settings.redis_url, decode_responses=True,
+                socket_connect_timeout=1, socket_timeout=1,
+            )
+            app.state.redis = redis_client
         yield
     finally:
         try:
-            if mongo_client is not None:
-                await mongo_client.close()
+            if redis_client is not None:
+                await redis_client.aclose()
         finally:
-            engine.dispose()
+            try:
+                if mongo_client is not None:
+                    await mongo_client.close()
+            finally:
+                engine.dispose()
     logger.info("App shutting down...")
